@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="utf-8" />
+		<title data-i18n="documentTitle">WideMinds 思维导航</title>
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<style>
+			:root {
+				color-scheme: light dark;
+				font-family: "Segoe UI", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+				background: #0e1016;
+				color: #f4f5f9;
+			}
+
+			body {
+				margin: 0;
+				padding: 0;
+				min-height: 100vh;
+				display: flex;
+				flex-direction: column;
+				background: linear-gradient(135deg, rgba(8, 10, 22, 0.96), rgba(20, 26, 45, 0.96));
+			}
+
+			header {
+				padding: 24px 32px;
+				display: flex;
+				justify-content: space-between;
+				align-items: center;
+			}
+
+			.header-actions {
+				display: flex;
+				gap: 12px;
+				align-items: center;
+			}
+
+			header h1 {
+				margin: 0;
+				font-size: 28px;
+				font-weight: 700;
+				letter-spacing: 0.05em;
+			}
+
+			header span {
+				font-size: 15px;
+				opacity: 0.7;
+			}
+
+			main {
+				flex: 1;
+				display: grid;
+				grid-template-columns: 360px 1fr;
+				gap: 24px;
+				padding: 0 32px 32px;
+			}
+
+			.card {
+				background: rgba(26, 32, 46, 0.8);
+				border: 1px solid rgba(101, 117, 161, 0.3);
+				border-radius: 20px;
+				padding: 24px;
+				box-shadow: 0 12px 40px rgba(2, 8, 30, 0.35);
+				backdrop-filter: blur(12px);
+			}
+
+			.card h2 {
+				margin: 0 0 16px;
+				font-size: 18px;
+				letter-spacing: 0.04em;
+				text-transform: uppercase;
+				color: #7eaaff;
+			}
+
+			.form-group {
+				display: flex;
+				flex-direction: column;
+				gap: 6px;
+				margin-bottom: 16px;
+			}
+
+			label {
+				font-size: 13px;
+				opacity: 0.7;
+				letter-spacing: 0.03em;
+			}
+
+			input,
+			select,
+			textarea {
+				border-radius: 12px;
+				border: 1px solid rgba(104, 132, 205, 0.35);
+				background: rgba(11, 17, 31, 0.8);
+				color: inherit;
+				font-size: 14px;
+				padding: 10px 14px;
+				transition: border 160ms ease;
+			}
+
+			input:focus,
+			select:focus,
+			textarea:focus {
+				border-color: rgba(126, 170, 255, 0.9);
+				outline: none;
+			}
+
+			button {
+				border-radius: 12px;
+				border: none;
+				padding: 12px 18px;
+				font-weight: 600;
+				letter-spacing: 0.04em;
+				cursor: pointer;
+				transition: transform 140ms ease, box-shadow 140ms ease;
+			}
+
+			button.primary {
+				background: linear-gradient(135deg, #6e8dff, #8c6dff);
+				color: #fff;
+				box-shadow: 0 10px 25px rgba(110, 141, 255, 0.26);
+			}
+
+			button.primary:hover {
+				transform: translateY(-1px);
+				box-shadow: 0 12px 30px rgba(110, 141, 255, 0.32);
+			}
+
+			button.secondary {
+				background: rgba(110, 141, 255, 0.12);
+				color: #b2c4ff;
+				border: 1px solid rgba(110, 141, 255, 0.3);
+			}
+
+			.directions-list {
+				display: grid;
+				gap: 14px;
+			}
+
+			.direction-card {
+				border-radius: 16px;
+				padding: 16px;
+				background: rgba(17, 22, 34, 0.72);
+				border: 1px solid rgba(101, 117, 161, 0.28);
+			}
+
+			.direction-card h3 {
+				margin: 0 0 8px;
+				font-size: 15px;
+			}
+
+			.direction-card p {
+				margin: 0;
+				font-size: 13px;
+				opacity: 0.75;
+			}
+
+			.surface {
+				display: grid;
+				grid-template-columns: 1.2fr 0.8fr;
+				gap: 24px;
+				height: 100%;
+			}
+
+			#canvas-container {
+				position: relative;
+				border-radius: 20px;
+				overflow: hidden;
+				border: 1px solid rgba(101, 117, 161, 0.26);
+				background: rgba(12, 16, 28, 0.85);
+			}
+
+			canvas {
+				display: block;
+				width: 100%;
+				height: 100%;
+			}
+
+			#tree-container {
+				overflow-y: auto;
+				padding-right: 8px;
+			}
+
+			ul.thought-tree {
+				list-style: none;
+				padding-left: 0;
+				margin: 0;
+			}
+
+			ul.thought-tree li {
+				margin-bottom: 12px;
+			}
+
+			.thought-node {
+				border-radius: 14px;
+				padding: 12px;
+				background: rgba(23, 30, 49, 0.65);
+				border: 1px solid transparent;
+				transition: border 150ms ease, background 150ms ease;
+			}
+
+			.thought-node:hover {
+				border-color: rgba(110, 141, 255, 0.4);
+			}
+
+			.thought-node.highlight {
+				background: rgba(110, 141, 255, 0.18);
+				border-color: rgba(110, 141, 255, 0.8);
+			}
+
+			footer {
+				padding: 16px 32px;
+				font-size: 13px;
+				opacity: 0.6;
+				text-align: center;
+			}
+
+			@media (max-width: 1200px) {
+				main {
+					grid-template-columns: 1fr;
+				}
+				.surface {
+					grid-template-columns: 1fr;
+					height: auto;
+				}
+				#canvas-container {
+					height: 320px;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<header>
+			<div>
+				<h1 data-i18n="title">WideMinds 思维导航器</h1>
+				<span data-i18n="tagline">输入概念 → 获取方向 → 选择路径 → 深度探索</span>
+			</div>
+			<div class="header-actions">
+				<button id="language-toggle" class="secondary" data-i18n="languageToggle">切换到英文</button>
+				<button id="reset-session" class="secondary" data-i18n="resetSession">重置会话</button>
+			</div>
+		</header>
+
+		<main>
+			<section class="card">
+				<h2 data-i18n="creationHeading">创建与扩散</h2>
+				<form id="session-form">
+					<div class="form-group">
+						<label for="user-id" data-i18n="userIdLabel">用户 ID (可选)</label>
+						<input
+							id="user-id"
+							name="user-id"
+							data-i18n-placeholder="userIdPlaceholder"
+							placeholder="例如: learner-01"
+						/>
+					</div>
+					<div class="form-group">
+						<label for="concept" data-i18n="conceptLabel">起始概念 *</label>
+						<input
+							id="concept"
+							name="concept"
+							required
+							data-i18n-placeholder="conceptPlaceholder"
+							placeholder="例如: 机器学习"
+						/>
+					</div>
+					<div class="form-group">
+						<label for="context" data-i18n="contextLabel">上下文提示 (每行一个)</label>
+						<textarea
+							id="context"
+							rows="3"
+							data-i18n-placeholder="contextPlaceholder"
+							placeholder="已有背景、目标、限制"
+						></textarea>
+					</div>
+					<div class="form-group">
+						<label for="expansion-type" data-i18n="expansionTypeLabel">扩散模式</label>
+						<select id="expansion-type" name="expansion-type">
+							<option value="" data-i18n="expansionAuto">自动选择</option>
+							<option value="broad" data-i18n="expansionBroad">广度发散</option>
+							<option value="deep" data-i18n="expansionDeep">纵深挖掘</option>
+							<option value="lateral" data-i18n="expansionLateral">横向联想</option>
+							<option value="critical" data-i18n="expansionCritical">批判反思</option>
+						</select>
+					</div>
+					<button type="submit" class="primary" id="expand-button" data-i18n="generateDirections">生成扩散方向</button>
+				</form>
+
+				<div class="card" style="margin-top: 24px">
+					<h2 data-i18n="recommendedHeading">推荐方向</h2>
+					<div id="directions" class="directions-list"></div>
+				</div>
+			</section>
+
+			<section class="surface">
+				<div id="canvas-container">
+					<canvas id="mindmap-canvas"></canvas>
+				</div>
+				<div class="card" id="tree-card">
+					<h2 data-i18n="thoughtPathHeading">思维路径</h2>
+					<div id="tree-container">
+						<ul id="thought-tree" class="thought-tree"></ul>
+					</div>
+				</div>
+			</section>
+		</main>
+
+		<footer data-i18n="footer">WideMinds · 让灵感有迹可循</footer>
+
+		<script src="/static/js/thought-tree.js"></script>
+		<script src="/static/js/interactive-canvas.js"></script>
+		<script>
+			const translations = {
+				zh: {
+					documentTitle: 'WideMinds 思维导航',
+					title: 'WideMinds 思维导航器',
+					tagline: '输入概念 → 获取方向 → 选择路径 → 深度探索',
+					languageToggle: '切换到英文',
+					resetSession: '重置会话',
+					creationHeading: '创建与扩散',
+					userIdLabel: '用户 ID (可选)',
+					userIdPlaceholder: '例如: learner-01',
+					conceptLabel: '起始概念 *',
+					conceptPlaceholder: '例如: 机器学习',
+					contextLabel: '上下文提示 (每行一个)',
+					contextPlaceholder: '已有背景、目标、限制',
+					expansionTypeLabel: '扩散模式',
+					expansionAuto: '自动选择',
+					expansionBroad: '广度发散',
+					expansionDeep: '纵深挖掘',
+					expansionLateral: '横向联想',
+					expansionCritical: '批判反思',
+					generateDirections: '生成扩散方向',
+					recommendedHeading: '推荐方向',
+					thoughtPathHeading: '思维路径',
+					footer: 'WideMinds · 让灵感有迹可循',
+					deepExplore: '深入探索',
+					createSessionFirst: '请先创建并加载会话。',
+					conceptRequired: '请输入要扩散的概念。',
+					treePlaceholder: '尚未创建思维树，先输入概念生成新会话。',
+					unnamedNode: '未命名节点',
+					pathFallback: '路径',
+					depthLabel: '深度',
+					collapse: '折叠',
+					expand: '展开',
+					nodeFallback: '节点',
+					noDirections: '暂未生成推荐方向。',
+				},
+				en: {
+					documentTitle: 'WideMinds Navigator',
+					title: 'WideMinds Navigator',
+					tagline: 'Enter a concept → get directions → choose a path → dive deeper',
+					languageToggle: 'Switch to Chinese',
+					resetSession: 'Reset Session',
+					creationHeading: 'Create & Expand',
+					userIdLabel: 'User ID (optional)',
+					userIdPlaceholder: 'E.g. learner-01',
+					conceptLabel: 'Starting concept *',
+					conceptPlaceholder: 'E.g. Machine Learning',
+					contextLabel: 'Context hints (one per line)',
+					contextPlaceholder: 'Existing background, goals, constraints',
+					expansionTypeLabel: 'Expansion mode',
+					expansionAuto: 'Auto select',
+					expansionBroad: 'Broad exploration',
+					expansionDeep: 'Deep dive',
+					expansionLateral: 'Lateral thinking',
+					expansionCritical: 'Critical evaluation',
+					generateDirections: 'Generate directions',
+					recommendedHeading: 'Recommended directions',
+					thoughtPathHeading: 'Thought path',
+					footer: 'WideMinds · Let inspiration leave a trail',
+					deepExplore: 'Deepen this direction',
+					createSessionFirst: 'Create and load a session first.',
+					conceptRequired: 'Please enter a concept to expand.',
+					treePlaceholder: 'No thought tree yet. Enter a concept to start a session.',
+					unnamedNode: 'Untitled node',
+					pathFallback: 'Path',
+					depthLabel: 'Depth',
+					collapse: 'Collapse',
+					expand: 'Expand',
+					nodeFallback: 'Node',
+					noDirections: 'No recommended directions yet.',
+				},
+			};
+
+			const i18n = (() => {
+				const listeners = new Set();
+				const supported = Object.keys(translations);
+				let currentLanguage = localStorage.getItem('wideminds-language');
+				if (!supported.includes(currentLanguage)) {
+					currentLanguage = 'zh';
+				}
+
+				function t(key, fallback) {
+					const langTable = translations[currentLanguage] || translations.zh;
+					if (langTable && key in langTable) {
+						return langTable[key];
+					}
+					if (translations.zh && key in translations.zh) {
+						return translations.zh[key];
+					}
+					return fallback ?? key;
+				}
+
+				function applyStaticText() {
+					document.documentElement.lang = currentLanguage === 'zh' ? 'zh-CN' : 'en';
+					document.title = t('documentTitle');
+
+					document.querySelectorAll('[data-i18n]').forEach((el) => {
+						const key = el.getAttribute('data-i18n');
+						if (!key || el.tagName === 'TITLE') return;
+						const text = t(key);
+						if (typeof text === 'string') {
+							el.textContent = text;
+						}
+					});
+
+					document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
+						const key = el.getAttribute('data-i18n-placeholder');
+						if (!key) return;
+						const text = t(key, el.getAttribute('placeholder'));
+						if (typeof text === 'string') {
+							el.setAttribute('placeholder', text);
+						}
+					});
+				}
+
+				function setLanguage(lang, options = {}) {
+					if (!supported.includes(lang)) {
+						lang = 'zh';
+					}
+					currentLanguage = lang;
+					if (options.persist !== false) {
+						localStorage.setItem('wideminds-language', currentLanguage);
+					}
+					applyStaticText();
+					listeners.forEach((listener) => {
+						try {
+							listener(currentLanguage);
+						} catch (error) {
+							console.error('Language listener error:', error);
+						}
+					});
+				}
+
+				function onChange(listener) {
+					listeners.add(listener);
+					return () => listeners.delete(listener);
+				}
+
+				function getLanguage() {
+					return currentLanguage;
+				}
+
+				return { t, setLanguage, onChange, getLanguage };
+			})();
+
+			window.i18n = i18n;
+
+			const api = {
+				async createSession(userId, concept) {
+					const response = await fetch('/api/sessions', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ user_id: userId, concept }),
+					});
+					if (!response.ok) throw new Error(await response.text());
+					return response.json();
+				},
+				async getSession(sessionId) {
+					const res = await fetch(`/api/sessions/${sessionId}`);
+					if (!res.ok) throw new Error(await res.text());
+					return res.json();
+				},
+				async expand(concept, context, expansionType) {
+					const res = await fetch('/api/expand', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ concept, context, expansion_type: expansionType }),
+					});
+					if (!res.ok) throw new Error(await res.text());
+					return res.json();
+				},
+				async explore(sessionId, direction) {
+					const res = await fetch(`/api/sessions/${sessionId}`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ direction }),
+					});
+					if (!res.ok) throw new Error(await res.text());
+					return res.json();
+				},
+			};
+
+			const tree = new ThoughtTree('thought-tree');
+			const canvas = new InteractiveCanvas('mindmap-canvas', { tree });
+
+			let activeSession = null;
+			let lastExpansionResult = null;
+
+			const languageToggle = document.getElementById('language-toggle');
+			languageToggle.addEventListener('click', () => {
+				const nextLanguage = i18n.getLanguage() === 'zh' ? 'en' : 'zh';
+				i18n.setLanguage(nextLanguage);
+			});
+
+			function parseContext(text) {
+				return text
+					.split(/\n+/)
+					.map((line) => line.trim())
+					.filter(Boolean);
+			}
+
+			function renderDirections(result) {
+				const container = document.getElementById('directions');
+				container.innerHTML = '';
+				lastExpansionResult = result;
+
+				const directions = result?.directions || [];
+				if (!directions.length) {
+					const empty = document.createElement('p');
+					empty.style.opacity = '0.6';
+					empty.textContent = i18n.t('noDirections');
+					container.appendChild(empty);
+					return;
+				}
+
+				directions.forEach((direction) => {
+					const card = document.createElement('div');
+					card.classList.add('direction-card');
+
+					const title = document.createElement('h3');
+					title.textContent = direction.title || direction.type || i18n.t('pathFallback');
+
+					const desc = document.createElement('p');
+					desc.textContent = direction.description || '';
+
+					const button = document.createElement('button');
+					button.classList.add('secondary');
+					button.textContent = i18n.t('deepExplore');
+					button.addEventListener('click', async () => {
+						if (!activeSession) {
+							alert(i18n.t('createSessionFirst'));
+							return;
+						}
+						try {
+							const thought = await api.explore(activeSession.id, direction);
+							await refreshSession(activeSession.id);
+							tree.highlightPath(thought.id);
+						} catch (error) {
+							alert(error.message);
+						}
+					});
+
+					card.appendChild(title);
+					card.appendChild(desc);
+					card.appendChild(button);
+					container.appendChild(card);
+				});
+			}
+
+			async function refreshSession(sessionId) {
+				try {
+					const session = await api.getSession(sessionId);
+					activeSession = session;
+					tree.render(session);
+					canvas.render(session);
+				} catch (error) {
+					console.error(error);
+				}
+			}
+
+			document.getElementById('session-form').addEventListener('submit', async (event) => {
+				event.preventDefault();
+				const userId = document.getElementById('user-id').value.trim();
+				const concept = document.getElementById('concept').value.trim();
+				const context = parseContext(document.getElementById('context').value);
+				const expansionType = document.getElementById('expansion-type').value;
+
+				if (!concept) {
+					alert(i18n.t('conceptRequired'));
+					return;
+				}
+
+				try {
+					const session = await api.createSession(userId, concept);
+					activeSession = session;
+					tree.render(session);
+					canvas.render(session);
+
+					const directions = await api.expand(concept, context, expansionType);
+					renderDirections(directions);
+				} catch (error) {
+					alert(error.message);
+				}
+			});
+
+			document.getElementById('reset-session').addEventListener('click', () => {
+				activeSession = null;
+				tree.render(null);
+				canvas.clear();
+				renderDirections(null);
+			});
+
+			i18n.onChange(() => {
+				renderDirections(lastExpansionResult);
+				if (activeSession) {
+					tree.render(activeSession);
+					canvas.render(activeSession);
+				} else {
+					tree.render(null);
+					canvas.render(null);
+				}
+			});
+
+			i18n.setLanguage(i18n.getLanguage(), { persist: false });
+
+			canvas.initialize();
+		</script>
+	</body>
+</html>
