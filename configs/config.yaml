@@ -1,0 +1,8 @@
+port: 8080
+mcp_port: 9090
+llm_api_key: ""
+llm_base_url: ""
+llm_model: "gpt-4.1"
+data_dir: ""
+web_dir: "web"
+use_file_store: false
