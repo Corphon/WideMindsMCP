@@ -129,15 +129,46 @@ func (llm *LLMOrchestrator) GenerateThoughtDirections(concept string, context []
 	return llm.generateFallbackDirections(concept, normalizedContext), nil
 }
 
-func (llm *LLMOrchestrator) ExploreDirection(direction models.Direction, depth int) ([]*models.Thought, error) {
+func (llm *LLMOrchestrator) ExploreDirection(direction models.Direction, depth int, context []string) ([]*models.Thought, error) {
 	if depth <= 0 {
 		depth = 1
 	}
 
+	normalizedContext := uniqueStrings(context)
+	contextSummary := ""
+	if len(normalizedContext) > 0 {
+		joined := normalizedContext
+		if len(joined) > 3 {
+			joined = joined[:3]
+		}
+		contextSummary = strings.Join(joined, " | ")
+	}
+
 	thoughts := make([]*models.Thought, 0, depth)
 	for i := 0; i < depth; i++ {
-		content := fmt.Sprintf("%s - depth level %d", direction.Title, i+1)
-		thought := models.NewThought(content, "", direction)
+		contentBuilder := strings.Builder{}
+		contentBuilder.Grow(256)
+		contentBuilder.WriteString(strings.TrimSpace(direction.Title))
+		if contentBuilder.Len() == 0 {
+			contentBuilder.WriteString("Exploration insight")
+		}
+		contentBuilder.WriteString(fmt.Sprintf(" • level %d", i+1))
+
+		if desc := strings.TrimSpace(direction.Description); desc != "" {
+			contentBuilder.WriteString(" — ")
+			contentBuilder.WriteString(desc)
+		}
+
+		if contextSummary != "" {
+			contentBuilder.WriteString(" (context: ")
+			contentBuilder.WriteString(contextSummary)
+			if len(normalizedContext) > 3 {
+				contentBuilder.WriteString(" …")
+			}
+			contentBuilder.WriteString(")")
+		}
+
+		thought := models.NewThought(contentBuilder.String(), "", direction)
 		thought.Depth = i + 1
 		thoughts = append(thoughts, thought)
 	}
