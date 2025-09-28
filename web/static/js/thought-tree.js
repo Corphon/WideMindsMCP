@@ -8,10 +8,23 @@ const treeTranslate = (key, fallback) => {
 };
 
 class ThoughtTree {
-    constructor(containerId) {
+    constructor(containerId, options = {}) {
         this.container = document.getElementById(containerId);
         this.nodes = new Map();
         this.rootId = null;
+        this.handlers = {
+            onEdit: typeof options.onEdit === 'function' ? options.onEdit : null,
+            onDelete: typeof options.onDelete === 'function' ? options.onDelete : null,
+        };
+    }
+
+    setHandlers(handlers = {}) {
+        if (typeof handlers.onEdit === 'function') {
+            this.handlers.onEdit = handlers.onEdit;
+        }
+        if (typeof handlers.onDelete === 'function') {
+            this.handlers.onDelete = handlers.onDelete;
+        }
     }
 
     render(sessionData) {
@@ -172,8 +185,8 @@ class ThoughtNode {
 
         const toggleBtn = document.createElement('button');
         toggleBtn.classList.add('secondary');
-    const collapseLabel = () => treeTranslate('collapse', '折叠');
-    const expandLabel = () => treeTranslate('expand', '展开');
+        const collapseLabel = () => treeTranslate('collapse', '折叠');
+        const expandLabel = () => treeTranslate('expand', '展开');
         toggleBtn.textContent = collapseLabel();
         toggleBtn.addEventListener('click', () => {
             if (this.expanded) {
@@ -186,6 +199,28 @@ class ThoughtNode {
         });
 
         controls.appendChild(toggleBtn);
+
+        if (this.tree?.handlers?.onEdit) {
+            const editBtn = document.createElement('button');
+            editBtn.classList.add('secondary');
+            editBtn.textContent = treeTranslate('editNode', '编辑');
+            editBtn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                this.tree.handlers.onEdit?.(this.thought);
+            });
+            controls.appendChild(editBtn);
+        }
+
+        if (this.tree?.handlers?.onDelete) {
+            const deleteBtn = document.createElement('button');
+            deleteBtn.classList.add('secondary');
+            deleteBtn.textContent = treeTranslate('deleteNode', '删除');
+            deleteBtn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                this.tree.handlers.onDelete?.(this.thought);
+            });
+            controls.appendChild(deleteBtn);
+        }
 
         this.container.innerHTML = '';
         this.container.appendChild(title);
@@ -252,8 +287,8 @@ function arraysEqual(a, b) {
 }
 
 // 辅助函数
-async function createThoughtVisualization(sessionId) {
-    const tree = new ThoughtTree('thought-tree');
+async function createThoughtVisualization(sessionId, options = {}) {
+    const tree = new ThoughtTree('thought-tree', options);
     const session = await loadSessionData(sessionId);
     tree.render(session);
     return tree;
