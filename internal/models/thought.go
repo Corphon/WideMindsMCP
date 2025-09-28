@@ -22,6 +22,11 @@ type Thought struct {
 	parent    *Thought   `json:"-"`
 }
 
+type ThoughtUpdate struct {
+	Content   *string    `json:"content,omitempty"`
+	Direction *Direction `json:"direction,omitempty"`
+}
+
 // 方法
 func NewThought(content, sessionID string, direction Direction) *Thought {
 	now := time.Now().UTC()
@@ -56,6 +61,25 @@ func (t *Thought) AddChild(child *Thought) {
 	}
 
 	t.Children = append(t.Children, child)
+}
+
+func (t *Thought) RemoveChildByID(childID string) bool {
+	if t == nil {
+		return false
+	}
+	for i, child := range t.Children {
+		if child == nil {
+			continue
+		}
+		if child.ID == childID {
+			t.Children = append(t.Children[:i], t.Children[i+1:]...)
+			return true
+		}
+		if child.RemoveChildByID(childID) {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *Thought) GetPath() []string {
