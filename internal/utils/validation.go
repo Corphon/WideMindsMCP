@@ -19,6 +19,7 @@ const (
 	MaxDirectionDescLength  = 600
 	MaxKeywordLength        = 50
 	MaxDirectionKeywords    = 16
+	MaxThoughtContentLength = 400
 )
 
 var allowedDirectionTypes = map[models.DirectionType]struct{}{
@@ -160,6 +161,35 @@ func ValidateDirection(direction *models.Direction) error {
 
 	if direction.Relevance < 0 || direction.Relevance > 1 {
 		return ValidationError("direction.relevance must be between 0 and 1")
+	}
+
+	return nil
+}
+
+func ValidateThoughtUpdate(update *models.ThoughtUpdate) error {
+	if update == nil {
+		return ValidationError("update payload is required")
+	}
+
+	if update.Content == nil && update.Direction == nil {
+		return ValidationError("at least one field must be provided")
+	}
+
+	if update.Content != nil {
+		trimmed := strings.TrimSpace(*update.Content)
+		if trimmed == "" {
+			return ValidationError("content must not be empty")
+		}
+		if utf8.RuneCountInString(trimmed) > MaxThoughtContentLength {
+			return ValidationError("content is too long")
+		}
+		*update.Content = trimmed
+	}
+
+	if update.Direction != nil {
+		if err := ValidateDirection(update.Direction); err != nil {
+			return err
+		}
 	}
 
 	return nil
