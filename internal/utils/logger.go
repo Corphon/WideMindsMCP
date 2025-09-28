@@ -1,26 +1,42 @@
 package utils
 
 import (
-	"log"
+	"context"
+	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 )
 
+// Field 表示结构化日志的键值对。
+type Field struct {
+	Key   string
+	Value interface{}
+}
+
+// KV 是创建 Field 的便捷方法。
+func KV(key string, value interface{}) Field {
+	return Field{Key: key, Value: value}
+}
+
 var (
 	loggerOnce    sync.Once
-	defaultLogger *log.Logger
+	defaultLogger *slog.Logger
 )
 
-// Logger returns a singleton logger instance writing to stdout.
-func Logger() *log.Logger {
+// Logger 返回全局结构化日志对象（JSON 输出）。
+func Logger() *slog.Logger {
 	loggerOnce.Do(func() {
-		defaultLogger = log.New(os.Stdout, "[WideMinds] ", log.LstdFlags|log.Lshortfile)
+		handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			AddSource: true,
+		})
+		defaultLogger = slog.New(handler)
 	})
 	return defaultLogger
 }
 
-// SetLogger allows replacing the global logger instance.
-func SetLogger(logger *log.Logger) {
+// SetLogger 允许替换全局日志对象，便于测试。
+func SetLogger(logger *slog.Logger) {
 	if logger == nil {
 		return
 	}
@@ -28,17 +44,60 @@ func SetLogger(logger *log.Logger) {
 	defaultLogger = logger
 }
 
-// Infof logs an informational message.
+// With 生成带默认字段的派生日志器。
+func With(fields ...Field) *slog.Logger {
+	args := make([]any, 0, len(fields))
+	for _, field := range fields {
+		if field.Key == "" {
+			continue
+		}
+		args = append(args, slog.Any(field.Key, field.Value))
+	}
+	return Logger().With(args...)
+}
+
+// Debug 输出调试级别日志。
+func Debug(msg string, fields ...Field) {
+	logWithLevel(slog.LevelDebug, msg, fields...)
+}
+
+// Info 输出信息级别日志。
+func Info(msg string, fields ...Field) {
+	logWithLevel(slog.LevelInfo, msg, fields...)
+}
+
+// Warn 输出警告级别日志。
+func Warn(msg string, fields ...Field) {
+	logWithLevel(slog.LevelWarn, msg, fields...)
+}
+
+// Error 输出错误级别日志。
+func Error(msg string, fields ...Field) {
+	logWithLevel(slog.LevelError, msg, fields...)
+}
+
+// Infof 兼容旧接口，建议改用 Info。
 func Infof(format string, args ...interface{}) {
-	Logger().Printf("INFO: "+format, args...)
+	Info(fmt.Sprintf(format, args...))
 }
 
-// Warnf logs a warning message.
+// Warnf 兼容旧接口，建议改用 Warn。
 func Warnf(format string, args ...interface{}) {
-	Logger().Printf("WARN: "+format, args...)
+	Warn(fmt.Sprintf(format, args...))
 }
 
-// Errorf logs an error message.
+// Errorf 兼容旧接口，建议改用 Error。
 func Errorf(format string, args ...interface{}) {
-	Logger().Printf("ERROR: "+format, args...)
+	Error(fmt.Sprintf(format, args...))
+}
+
+func logWithLevel(level slog.Level, msg string, fields ...Field) {
+	attrs := make([]slog.Attr, 0, len(fields))
+	for _, field := range fields {
+		if field.Key == "" {
+			continue
+		}
+		attrs = append(attrs, slog.Any(field.Key, field.Value))
+	}
+	Logger().LogAttrs(context.Background(), level, msg, attrs...)
 }
