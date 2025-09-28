@@ -5,6 +5,8 @@ package mcp
 import (
 	"errors"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	appErrors "WideMindsMCP/internal/errors"
 	"WideMindsMCP/internal/models"
@@ -34,6 +36,26 @@ type CreateSessionTool struct {
 
 type GetSessionTool struct {
 	manager *services.SessionManager
+}
+
+const (
+	maxConceptLength        = 200
+	maxContextItems         = 20
+	maxContextItemLength    = 120
+	maxDirectionTitleLength = 120
+	maxDirectionDescLength  = 600
+	maxKeywordLength        = 50
+	maxDirectionKeywords    = 16
+	maxGeneratedDirections  = 12
+	maxUserIDLength         = 64
+	maxSessionIDLength      = 64
+)
+
+var allowedDirectionTypes = map[models.DirectionType]struct{}{
+	models.Broad:    {},
+	models.Deep:     {},
+	models.Lateral:  {},
+	models.Critical: {},
 }
 
 // 函数
@@ -67,18 +89,37 @@ func (t *ExpandThoughtTool) Execute(params map[string]interface{}) (interface{},
 		return nil, errors.New("thought expander not available")
 	}
 
-	concept := getString(params, "concept")
-	if concept == "" {
-		return nil, appErrors.ErrInvalidRequest
+	concept := strings.TrimSpace(getString(params, "concept"))
+	if err := validateConcept(concept); err != nil {
+		return nil, err
 	}
 
-	context := getStringSlice(params, "context")
-	expansionType := models.DirectionType(getString(params, "expansion_type"))
+	contextSlice := getStringSlice(params, "context")
+	normalizedContext, err := normalizeContext(contextSlice)
+	if err != nil {
+		return nil, err
+	}
+
+	expansionTypeRaw := strings.ToLower(strings.TrimSpace(getString(params, "expansion_type")))
+	var expansionType models.DirectionType
+	if expansionTypeRaw != "" {
+		expansionType = models.DirectionType(expansionTypeRaw)
+		if _, ok := allowedDirectionTypes[expansionType]; !ok {
+			return nil, validationError("expansion_type is invalid")
+		}
+	}
+
 	maxDirections := getInt(params, "max_directions", 4)
+	if maxDirections <= 0 {
+		maxDirections = 4
+	}
+	if maxDirections > maxGeneratedDirections {
+		return nil, validationError("max_directions is too large")
+	}
 
 	result, err := t.expander.Expand(&services.ExpansionRequest{
 		Concept:       concept,
-		Context:       context,
+		Context:       normalizedContext,
 		ExpansionType: expansionType,
 		MaxDirections: maxDirections,
 	})
@@ -111,25 +152,22 @@ func (t *ExploreDirectionTool) Execute(params map[string]interface{}) (interface
 		return nil, errors.New("thought expander not available")
 	}
 
-	sessionID := getString(params, "session_id")
-	if sessionID == "" {
-		return nil, appErrors.ErrInvalidRequest
+	sessionID := strings.TrimSpace(getString(params, "session_id"))
+	if err := validateSessionID(sessionID); err != nil {
+		return nil, err
 	}
 
 	directionMap, ok := params["direction"].(map[string]interface{})
 	if !ok {
-		return nil, appErrors.ErrInvalidRequest
+		return nil, validationError("direction payload is required")
 	}
 
-	direction := models.Direction{
-		Type:        models.DirectionType(getString(directionMap, "type")),
-		Title:       getString(directionMap, "title"),
-		Description: getString(directionMap, "description"),
-		Keywords:    getStringSlice(directionMap, "keywords"),
-		Relevance:   getFloat(directionMap, "relevance", 0.5),
+	direction, err := buildDirection(directionMap)
+	if err != nil {
+		return nil, err
 	}
 
-	thought, err := t.expander.ExploreDirection(direction, sessionID)
+	thought, err := t.expander.ExploreDirection(*direction, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -163,10 +201,13 @@ func (t *CreateSessionTool) Execute(params map[string]interface{}) (interface{},
 		return nil, errors.New("session manager not available")
 	}
 
-	userID := getString(params, "user_id")
-	concept := getString(params, "concept")
-	if concept == "" {
-		return nil, appErrors.ErrInvalidRequest
+	userID := strings.TrimSpace(getString(params, "user_id"))
+	concept := strings.TrimSpace(getString(params, "concept"))
+	if err := validateUserID(userID); err != nil {
+		return nil, err
+	}
+	if err := validateConcept(concept); err != nil {
+		return nil, err
 	}
 
 	session, err := t.manager.CreateSession(userID, concept)
@@ -197,9 +238,9 @@ func (t *GetSessionTool) Execute(params map[string]interface{}) (interface{}, er
 		return nil, errors.New("session manager not available")
 	}
 
-	sessionID := getString(params, "session_id")
-	if sessionID == "" {
-		return nil, appErrors.ErrInvalidRequest
+	sessionID := strings.TrimSpace(getString(params, "session_id"))
+	if err := validateSessionID(sessionID); err != nil {
+		return nil, err
 	}
 
 	session, err := t.manager.GetSession(sessionID)
@@ -291,4 +332,126 @@ func getFloat(params map[string]interface{}, key string, fallback float64) float
 		return float64(v)
 	}
 	return fallback
+}
+
+func normalizeContext(items []string) ([]string, error) {
+	if len(items) > maxContextItems {
+		return nil, validationError("context has too many entries")
+	}
+	normalized := make([]string, 0, len(items))
+	for _, item := range items {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if utf8.RuneCountInString(trimmed) > maxContextItemLength {
+			return nil, validationError("context item is too long")
+		}
+		normalized = append(normalized, trimmed)
+	}
+	return normalized, nil
+}
+
+func normalizeKeywords(items []string) ([]string, error) {
+	cleaned := make([]string, 0, len(items))
+	for _, item := range items {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if utf8.RuneCountInString(trimmed) > maxKeywordLength {
+			return nil, validationError("direction.keywords contains an entry that is too long")
+		}
+		cleaned = append(cleaned, trimmed)
+		if len(cleaned) > maxDirectionKeywords {
+			return nil, validationError("direction.keywords has too many entries")
+		}
+	}
+	return cleaned, nil
+}
+
+func validateConcept(concept string) error {
+	if concept == "" {
+		return validationError("concept is required")
+	}
+	if utf8.RuneCountInString(concept) > maxConceptLength {
+		return validationError("concept is too long")
+	}
+	return nil
+}
+
+func validateUserID(userID string) error {
+	if userID == "" {
+		return nil
+	}
+	if strings.ContainsAny(userID, " \t\r\n") {
+		return validationError("user_id must not contain whitespace")
+	}
+	if utf8.RuneCountInString(userID) > maxUserIDLength {
+		return validationError("user_id is too long")
+	}
+	return nil
+}
+
+func validateSessionID(sessionID string) error {
+	if sessionID == "" {
+		return validationError("session_id is required")
+	}
+	if strings.ContainsAny(sessionID, " \t\r\n") {
+		return validationError("session_id must not contain whitespace")
+	}
+	if utf8.RuneCountInString(sessionID) > maxSessionIDLength {
+		return validationError("session_id is too long")
+	}
+	return nil
+}
+
+func buildDirection(payload map[string]interface{}) (*models.Direction, error) {
+	if payload == nil {
+		return nil, validationError("direction payload is required")
+	}
+
+	dirTypeStr := strings.ToLower(strings.TrimSpace(getString(payload, "type")))
+	if dirTypeStr == "" {
+		return nil, validationError("direction.type is required")
+	}
+	dirType := models.DirectionType(dirTypeStr)
+	if _, ok := allowedDirectionTypes[dirType]; !ok {
+		return nil, validationError("direction.type is invalid")
+	}
+
+	title := strings.TrimSpace(getString(payload, "title"))
+	if title == "" {
+		return nil, validationError("direction.title is required")
+	}
+	if utf8.RuneCountInString(title) > maxDirectionTitleLength {
+		return nil, validationError("direction.title is too long")
+	}
+
+	description := strings.TrimSpace(getString(payload, "description"))
+	if utf8.RuneCountInString(description) > maxDirectionDescLength {
+		return nil, validationError("direction.description is too long")
+	}
+
+	keywords, err := normalizeKeywords(getStringSlice(payload, "keywords"))
+	if err != nil {
+		return nil, err
+	}
+
+	relevance := getFloat(payload, "relevance", 0.5)
+	if relevance < 0 || relevance > 1 {
+		return nil, validationError("direction.relevance must be between 0 and 1")
+	}
+
+	return &models.Direction{
+		Type:        dirType,
+		Title:       title,
+		Description: description,
+		Keywords:    keywords,
+		Relevance:   relevance,
+	}, nil
+}
+
+func validationError(msg string) error {
+	return fmt.Errorf("%w: %s", appErrors.ErrInvalidRequest, msg)
 }
