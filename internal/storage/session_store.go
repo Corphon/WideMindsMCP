@@ -3,6 +3,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ type SessionStore interface {
 	Delete(sessionID string) error
 	GetByUserID(userID string) ([]*models.Session, error)
 	GetExpiredSessions(before time.Time) ([]*models.Session, error)
+	Ping(ctx context.Context) error
 }
 
 // 结构体
@@ -34,8 +36,9 @@ type InMemorySessionStore struct {
 }
 
 type FileSessionStore struct {
-	dataDir string
-	mutex   sync.RWMutex
+	dataDir   string
+	mutex     sync.RWMutex
+	userIndex map[string]map[string]struct{}
 }
 
 // 函数
@@ -43,6 +46,10 @@ func NewInMemorySessionStore() SessionStore {
 	return &InMemorySessionStore{
 		sessions: make(map[string]*models.Session),
 	}
+}
+
+func (store *InMemorySessionStore) Ping(ctx context.Context) error {
+	return nil
 }
 
 func NewFileSessionStore(dataDir string) SessionStore {
@@ -54,7 +61,57 @@ func NewFileSessionStore(dataDir string) SessionStore {
 		panic(fmt.Sprintf("failed to create session data directory: %v", err))
 	}
 
-	return &FileSessionStore{dataDir: dataDir}
+	store := &FileSessionStore{
+		dataDir:   dataDir,
+		userIndex: make(map[string]map[string]struct{}),
+	}
+
+	if err := store.buildIndex(); err != nil {
+		panic(fmt.Sprintf("failed to build session index: %v", err))
+	}
+
+	return store
+}
+
+func (store *FileSessionStore) Ping(ctx context.Context) error {
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+
+	_, err := os.Stat(store.dataDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (store *FileSessionStore) buildIndex() error {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	store.userIndex = make(map[string]map[string]struct{})
+
+	err := filepath.WalkDir(store.dataDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		session, err := decodeSession(data)
+		if err != nil {
+			return err
+		}
+		store.indexSessionLocked(session)
+		return nil
+	})
+
+	return err
 }
 
 // InMemorySessionStore方法
@@ -150,7 +207,12 @@ func (store *FileSessionStore) Save(session *models.Session) error {
 		return fmt.Errorf("session %s already exists", session.ID)
 	}
 
-	return writeSessionFile(path, session)
+	if err := writeSessionFile(path, session); err != nil {
+		return err
+	}
+
+	store.indexSessionLocked(session)
+	return nil
 }
 
 func (store *FileSessionStore) Get(sessionID string) (*models.Session, error) {
@@ -178,7 +240,12 @@ func (store *FileSessionStore) Update(session *models.Session) error {
 	defer store.mutex.Unlock()
 
 	path := store.sessionPath(session.ID)
-	return writeSessionFile(path, session)
+	if err := writeSessionFile(path, session); err != nil {
+		return err
+	}
+
+	store.indexSessionLocked(session)
+	return nil
 }
 
 func (store *FileSessionStore) Delete(sessionID string) error {
@@ -189,40 +256,27 @@ func (store *FileSessionStore) Delete(sessionID string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
+	store.removeFromIndexLocked(sessionID)
 	return nil
 }
 
 func (store *FileSessionStore) GetByUserID(userID string) ([]*models.Session, error) {
 	store.mutex.RLock()
-	defer store.mutex.RUnlock()
+	ids := store.lookupUserUnlocked(userID)
+	store.mutex.RUnlock()
 
-	sessions := make([]*models.Session, 0)
-	err := filepath.WalkDir(store.dataDir, func(path string, d fs.DirEntry, err error) error {
+	sessions := make([]*models.Session, 0, len(ids))
+	for _, id := range ids {
+		session, err := store.Get(id)
 		if err != nil {
-			return err
+			if errors.Is(err, appErrors.ErrSessionNotFound) {
+				continue
+			}
+			return nil, err
 		}
-
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
-			return nil
-		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-
-		session, err := decodeSession(data)
-		if err != nil {
-			return err
-		}
-
-		if session.UserID == userID {
-			sessions = append(sessions, session)
-		}
-		return nil
-	})
-
-	return sessions, err
+		sessions = append(sessions, session)
+	}
+	return sessions, nil
 }
 
 func (store *FileSessionStore) GetExpiredSessions(before time.Time) ([]*models.Session, error) {
@@ -320,4 +374,63 @@ func normalizeThoughtTree(thought *models.Thought, parent *models.Thought, paren
 	for _, child := range thought.Children {
 		normalizeThoughtTree(child, thought, thought.Path)
 	}
+}
+
+func (store *FileSessionStore) indexSessionLocked(session *models.Session) {
+	if session == nil {
+		return
+	}
+	if store.userIndex == nil {
+		store.userIndex = make(map[string]map[string]struct{})
+	}
+
+	for userID, ids := range store.userIndex {
+		if ids == nil {
+			continue
+		}
+		if _, ok := ids[session.ID]; ok && userID != session.UserID {
+			delete(ids, session.ID)
+		}
+	}
+
+	if session.UserID == "" {
+		return
+	}
+
+	ids := store.userIndex[session.UserID]
+	if ids == nil {
+		ids = make(map[string]struct{})
+		store.userIndex[session.UserID] = ids
+	}
+	ids[session.ID] = struct{}{}
+}
+
+func (store *FileSessionStore) removeFromIndexLocked(sessionID string) {
+	if store.userIndex == nil {
+		return
+	}
+	for userID, ids := range store.userIndex {
+		if ids == nil {
+			continue
+		}
+		delete(ids, sessionID)
+		if len(ids) == 0 {
+			delete(store.userIndex, userID)
+		}
+	}
+}
+
+func (store *FileSessionStore) lookupUserUnlocked(userID string) []string {
+	if userID == "" || store.userIndex == nil {
+		return nil
+	}
+	ids := store.userIndex[userID]
+	if len(ids) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(ids))
+	for id := range ids {
+		result = append(result, id)
+	}
+	return result
 }
