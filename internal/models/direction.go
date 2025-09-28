@@ -14,11 +14,11 @@ const (
 
 // 结构体
 type Direction struct {
-	Type        DirectionType
-	Title       string
-	Description string
-	Keywords    []string
-	Relevance   float64
+	Type        DirectionType `json:"type"`
+	Title       string        `json:"title"`
+	Description string        `json:"description"`
+	Keywords    []string      `json:"keywords"`
+	Relevance   float64       `json:"relevance"`
 }
 
 // 方法
