@@ -84,9 +84,7 @@ func (s *MCPServer) Start(port int) error {
 
 	go func() {
 		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			// log via utils logger to avoid panic
-			// fall back to standard log if necessary
-			fmt.Printf("MCP server error: %v\n", err)
+			utils.Error("MCP server error", utils.KV("error", err))
 		}
 	}()
 
