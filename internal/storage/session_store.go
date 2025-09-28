@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,7 @@ type InMemorySessionStore struct {
 type FileSessionStore struct {
 	dataDir      string
 	mutex        sync.RWMutex
+	indexPath    string
 	userIndex    map[string]map[string]struct{}
 	sessionIndex map[string]sessionMetadata
 }
@@ -68,40 +70,112 @@ func NewFileSessionStore(dataDir string) SessionStore {
 
 	store := &FileSessionStore{
 		dataDir:      dataDir,
+		indexPath:    filepath.Join(dataDir, "index.json"),
 		userIndex:    make(map[string]map[string]struct{}),
 		sessionIndex: make(map[string]sessionMetadata),
 	}
 
-	if err := store.buildIndex(); err != nil {
-		panic(fmt.Sprintf("failed to build session index: %v", err))
+	if err := store.initializeIndex(); err != nil {
+		panic(fmt.Sprintf("failed to initialize session index: %v", err))
 	}
 
 	return store
 }
 
-func (store *FileSessionStore) Ping(ctx context.Context) error {
-	store.mutex.RLock()
-	defer store.mutex.RUnlock()
-
-	_, err := os.Stat(store.dataDir)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
+type indexSnapshot struct {
+	Users    map[string][]string    `json:"users"`
+	Sessions map[string]indexRecord `json:"sessions"`
 }
 
-func (store *FileSessionStore) buildIndex() error {
+type indexRecord struct {
+	UpdatedAt string `json:"updated_at"`
+}
+
+func (store *FileSessionStore) initializeIndex() error {
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
+
+	if err := store.loadIndexLocked(); err == nil {
+		return nil
+	}
 
 	store.userIndex = make(map[string]map[string]struct{})
 	store.sessionIndex = make(map[string]sessionMetadata)
 
-	err := filepath.WalkDir(store.dataDir, func(path string, d fs.DirEntry, err error) error {
+	if err := store.rebuildIndexLocked(); err != nil {
+		return err
+	}
+
+	return store.persistIndexLocked()
+}
+
+func (store *FileSessionStore) loadIndexLocked() error {
+	if store.indexPath == "" {
+		return errors.New("index path not configured")
+	}
+
+	data, err := os.ReadFile(store.indexPath)
+	if err != nil {
+		return err
+	}
+
+	var snapshot indexSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return err
+	}
+
+	userIndex := make(map[string]map[string]struct{}, len(snapshot.Users))
+	sessionIndex := make(map[string]sessionMetadata, len(snapshot.Sessions))
+	validSessions := make(map[string]struct{}, len(snapshot.Sessions))
+
+	for id, record := range snapshot.Sessions {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, record.UpdatedAt)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Stat(store.sessionPath(id)); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		sessionIndex[id] = sessionMetadata{UpdatedAt: ts}
+		validSessions[id] = struct{}{}
+	}
+
+	for userID, ids := range snapshot.Users {
+		set := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			if _, ok := validSessions[id]; ok {
+				set[id] = struct{}{}
+			}
+		}
+		if len(set) > 0 {
+			userIndex[userID] = set
+		}
+	}
+
+	store.userIndex = userIndex
+	store.sessionIndex = sessionIndex
+
+	return nil
+}
+
+func (store *FileSessionStore) rebuildIndexLocked() error {
+	return filepath.WalkDir(store.dataDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
+		if d.IsDir() {
+			return nil
+		}
+		if store.indexPath != "" && filepath.Clean(path) == filepath.Clean(store.indexPath) {
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".json") {
 			return nil
 		}
 
@@ -114,11 +188,65 @@ func (store *FileSessionStore) buildIndex() error {
 		if err != nil {
 			return err
 		}
+
 		store.indexSessionLocked(session)
 		return nil
 	})
+}
 
-	return err
+func (store *FileSessionStore) persistIndexLocked() error {
+	if store.indexPath == "" {
+		return errors.New("index path not configured")
+	}
+
+	snapshot := indexSnapshot{
+		Users:    make(map[string][]string, len(store.userIndex)),
+		Sessions: make(map[string]indexRecord, len(store.sessionIndex)),
+	}
+
+	for id, meta := range store.sessionIndex {
+		snapshot.Sessions[id] = indexRecord{UpdatedAt: meta.UpdatedAt.Format(time.RFC3339)}
+	}
+
+	for userID, ids := range store.userIndex {
+		if len(ids) == 0 {
+			continue
+		}
+		items := make([]string, 0, len(ids))
+		for id := range ids {
+			if _, ok := snapshot.Sessions[id]; ok {
+				items = append(items, id)
+			}
+		}
+		if len(items) == 0 {
+			continue
+		}
+		sort.Strings(items)
+		snapshot.Users[userID] = items
+	}
+
+	payload, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	tempPath := store.indexPath + ".tmp"
+	if err := os.WriteFile(tempPath, payload, 0o644); err != nil {
+		return err
+	}
+
+	return os.Rename(tempPath, store.indexPath)
+}
+
+func (store *FileSessionStore) Ping(ctx context.Context) error {
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+
+	_, err := os.Stat(store.dataDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // InMemorySessionStore方法
@@ -219,7 +347,7 @@ func (store *FileSessionStore) Save(session *models.Session) error {
 	}
 
 	store.indexSessionLocked(session)
-	return nil
+	return store.persistIndexLocked()
 }
 
 func (store *FileSessionStore) Get(sessionID string) (*models.Session, error) {
@@ -252,7 +380,7 @@ func (store *FileSessionStore) Update(session *models.Session) error {
 	}
 
 	store.indexSessionLocked(session)
-	return nil
+	return store.persistIndexLocked()
 }
 
 func (store *FileSessionStore) Delete(sessionID string) error {
@@ -264,7 +392,7 @@ func (store *FileSessionStore) Delete(sessionID string) error {
 		return err
 	}
 	store.removeFromIndexLocked(sessionID)
-	return nil
+	return store.persistIndexLocked()
 }
 
 func (store *FileSessionStore) GetByUserID(userID string) ([]*models.Session, error) {
