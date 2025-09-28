@@ -3,8 +3,12 @@
 package models
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 	"time"
+
+	appErrors "WideMindsMCP/internal/errors"
 
 	"github.com/google/uuid"
 )
@@ -18,6 +22,124 @@ type Session struct {
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 	IsActive    bool      `json:"isActive"`
+}
+
+func (s *Session) FindThought(thoughtID string) (*Thought, *Thought) {
+	if s == nil || s.RootThought == nil || strings.TrimSpace(thoughtID) == "" {
+		return nil, nil
+	}
+
+	queue := []*Thought{s.RootThought}
+	parentMap := map[string]*Thought{s.RootThought.ID: nil}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		if current == nil {
+			continue
+		}
+		if current.ID == thoughtID {
+			return current, parentMap[current.ID]
+		}
+		for _, child := range current.Children {
+			if child == nil {
+				continue
+			}
+			parentMap[child.ID] = current
+			queue = append(queue, child)
+		}
+	}
+	return nil, nil
+}
+
+func (s *Session) NormalizeTree() {
+	if s == nil || s.RootThought == nil {
+		return
+	}
+
+	s.RootThought.ParentID = nil
+	s.RootThought.parent = nil
+	s.RootThought.Depth = 0
+	s.RootThought.Path = []string{s.RootThought.Content}
+
+	queue := []*Thought{s.RootThought}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		if current == nil {
+			continue
+		}
+
+		for _, child := range current.Children {
+			if child == nil {
+				continue
+			}
+			child.parent = current
+			child.ParentID = &current.ID
+			child.Depth = current.Depth + 1
+			if len(current.Path) > 0 {
+				child.Path = append(append([]string{}, current.Path...), child.Content)
+			} else {
+				child.Path = []string{child.Content}
+			}
+			queue = append(queue, child)
+		}
+	}
+}
+
+func (s *Session) ApplyThoughtUpdate(thoughtID string, update *ThoughtUpdate) (*Thought, error) {
+	if s == nil || strings.TrimSpace(thoughtID) == "" || update == nil {
+		return nil, appErrors.ErrInvalidRequest
+	}
+
+	target, _ := s.FindThought(thoughtID)
+	if target == nil {
+		return nil, fmt.Errorf("%w: %s", appErrors.ErrThoughtNotFound, thoughtID)
+	}
+
+	if update.Content != nil {
+		target.Content = strings.TrimSpace(*update.Content)
+	}
+	if update.Direction != nil {
+		target.Direction = *update.Direction
+	}
+
+	s.NormalizeTree()
+	s.UpdatedAt = time.Now().UTC()
+
+	return target, nil
+}
+
+func (s *Session) RemoveThought(thoughtID string) error {
+	if s == nil || strings.TrimSpace(thoughtID) == "" {
+		return appErrors.ErrInvalidRequest
+	}
+
+	if s.RootThought == nil {
+		return fmt.Errorf("%w: %s", appErrors.ErrThoughtNotFound, thoughtID)
+	}
+
+	if s.RootThought.ID == thoughtID {
+		s.RootThought = nil
+		s.UpdatedAt = time.Now().UTC()
+		return nil
+	}
+
+	_, parent := s.FindThought(thoughtID)
+	if parent == nil {
+		return fmt.Errorf("%w: %s", appErrors.ErrThoughtNotFound, thoughtID)
+	}
+
+	if !parent.RemoveChildByID(thoughtID) {
+		return fmt.Errorf("%w: %s", appErrors.ErrThoughtNotFound, thoughtID)
+	}
+
+	s.NormalizeTree()
+	s.UpdatedAt = time.Now().UTC()
+	return nil
 }
 
 type SessionMetadata struct {
