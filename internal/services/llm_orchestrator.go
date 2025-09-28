@@ -3,6 +3,7 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -167,6 +168,14 @@ func (llm *LLMOrchestrator) CallLLM(req *LLMRequest) (*LLMResponse, error) {
 		Model:     llm.model,
 		Timestamp: time.Now().UTC(),
 	}, nil
+}
+
+func (llm *LLMOrchestrator) HealthCheck(ctx context.Context) error {
+	if llm == nil {
+		return errors.New("llm orchestrator is nil")
+	}
+	_ = ctx
+	return nil
 }
 
 func (llm *LLMOrchestrator) BuildPrompt(concept string, context []string, promptType string) string {
