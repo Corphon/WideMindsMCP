@@ -10,16 +10,16 @@ import (
 
 // 结构体
 type Thought struct {
-	ID        string
-	Content   string
-	ParentID  *string
-	SessionID string
-	Direction Direction
-	Depth     int
-	CreatedAt time.Time
-	Children  []*Thought
-	Path      []string
-	parent    *Thought
+	ID        string     `json:"id"`
+	Content   string     `json:"content"`
+	ParentID  *string    `json:"parentId,omitempty"`
+	SessionID string     `json:"sessionId"`
+	Direction Direction  `json:"direction"`
+	Depth     int        `json:"depth"`
+	CreatedAt time.Time  `json:"createdAt"`
+	Children  []*Thought `json:"children,omitempty"`
+	Path      []string   `json:"path,omitempty"`
+	parent    *Thought   `json:"-"`
 }
 
 // 方法
