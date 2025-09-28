@@ -139,6 +139,53 @@ func (sm *SessionManager) AddThoughtToSession(sessionID string, thought *models.
 	return sm.UpdateSession(session)
 }
 
+func (sm *SessionManager) UpdateThought(sessionID, thoughtID string, update *models.ThoughtUpdate) (*models.Thought, error) {
+	if update == nil {
+		return nil, appErrors.ErrInvalidRequest
+	}
+
+	session, err := sm.GetSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	thought, err := session.ApplyThoughtUpdate(thoughtID, update)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := sm.store.Update(session); err != nil {
+		return nil, err
+	}
+
+	sm.mutex.Lock()
+	sm.cache[session.ID] = session
+	sm.mutex.Unlock()
+
+	return thought, nil
+}
+
+func (sm *SessionManager) DeleteThought(sessionID, thoughtID string) (*models.Session, error) {
+	session, err := sm.GetSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := session.RemoveThought(thoughtID); err != nil {
+		return nil, err
+	}
+
+	if err := sm.store.Update(session); err != nil {
+		return nil, err
+	}
+
+	sm.mutex.Lock()
+	sm.cache[session.ID] = session
+	sm.mutex.Unlock()
+
+	return session, nil
+}
+
 func (sm *SessionManager) GetActiveSessionsByUser(userID string) ([]*models.Session, error) {
 	sessions, err := sm.store.GetByUserID(userID)
 	if err != nil {
