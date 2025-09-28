@@ -6,6 +6,9 @@ var (
 	// ErrSessionNotFound indicates the requested session was not found in storage.
 	ErrSessionNotFound = errors.New("session not found")
 
+	// ErrThoughtNotFound indicates the requested thought node was not found.
+	ErrThoughtNotFound = errors.New("thought not found")
+
 	// ErrToolNotFound indicates an MCP tool lookup failed.
 	ErrToolNotFound = errors.New("mcp tool not found")
 
