@@ -305,6 +305,7 @@
 
 		<footer data-i18n="footer">WideMinds · 让灵感有迹可循</footer>
 
+		<script src="/static/js/app-state.js"></script>
 		<script src="/static/js/thought-tree.js"></script>
 		<script src="/static/js/interactive-canvas.js"></script>
 		<script>
@@ -492,9 +493,7 @@
 
 			const tree = new ThoughtTree('thought-tree');
 			const canvas = new InteractiveCanvas('mindmap-canvas', { tree });
-
-			let activeSession = null;
-			let lastExpansionResult = null;
+			const state = window.AppState;
 
 			const languageToggle = document.getElementById('language-toggle');
 			languageToggle.addEventListener('click', () => {
@@ -509,10 +508,13 @@
 					.filter(Boolean);
 			}
 
-			function renderDirections(result) {
+			function renderDirections(result, options = {}) {
+				const { persist = true } = options;
+				if (persist) {
+					state.setLastExpansionResult(result);
+				}
 				const container = document.getElementById('directions');
 				container.innerHTML = '';
-				lastExpansionResult = result;
 
 				const directions = result?.directions || [];
 				if (!directions.length) {
@@ -537,13 +539,14 @@
 					button.classList.add('secondary');
 					button.textContent = i18n.t('deepExplore');
 					button.addEventListener('click', async () => {
-						if (!activeSession) {
+						const session = state.getActiveSession();
+						if (!session) {
 							alert(i18n.t('createSessionFirst'));
 							return;
 						}
 						try {
-							const thought = await api.explore(activeSession.id, direction);
-							await refreshSession(activeSession.id);
+							const thought = await api.explore(session.id, direction);
+							await refreshSession(session.id);
 							tree.highlightPath(thought.id);
 						} catch (error) {
 							alert(error.message);
@@ -560,7 +563,7 @@
 			async function refreshSession(sessionId) {
 				try {
 					const session = await api.getSession(sessionId);
-					activeSession = session;
+					state.setActiveSession(session);
 					tree.render(session);
 					canvas.render(session);
 				} catch (error) {
@@ -582,7 +585,7 @@
 
 				try {
 					const session = await api.createSession(userId, concept);
-					activeSession = session;
+					state.setActiveSession(session);
 					tree.render(session);
 					canvas.render(session);
 
@@ -594,20 +597,21 @@
 			});
 
 			document.getElementById('reset-session').addEventListener('click', () => {
-				activeSession = null;
+				state.reset();
 				tree.render(null);
 				canvas.clear();
 				renderDirections(null);
 			});
 
 			i18n.onChange(() => {
-				renderDirections(lastExpansionResult);
-				if (activeSession) {
-					tree.render(activeSession);
-					canvas.render(activeSession);
+				renderDirections(state.getLastExpansionResult(), { persist: false });
+				const session = state.getActiveSession();
+				if (session) {
+					tree.render(session);
+					canvas.render(session);
 				} else {
 					tree.render(null);
-					canvas.render(null);
+					canvas.clear();
 				}
 			});
 
