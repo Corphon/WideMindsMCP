@@ -15,7 +15,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	appErrors "WideMindsMCP/internal/errors"
 	"WideMindsMCP/internal/mcp"
@@ -41,24 +40,8 @@ type Config struct {
 }
 
 const (
-	maxRequestBodyBytes     int64 = 64 * 1024
-	maxConceptLength              = 200
-	maxUserIDLength               = 64
-	maxSessionIDLength            = 64
-	maxDirectionTitleLength       = 120
-	maxDirectionDescLength        = 600
-	maxKeywordLength              = 50
-	maxDirectionKeywords          = 16
-	maxContextItems               = 20
-	maxContextItemLength          = 120
+	maxRequestBodyBytes int64 = 64 * 1024
 )
-
-var allowedDirectionTypes = map[models.DirectionType]struct{}{
-	models.Broad:    {},
-	models.Deep:     {},
-	models.Lateral:  {},
-	models.Critical: {},
-}
 
 // 函数
 func main() {
@@ -115,10 +98,15 @@ func loadConfig() (*Config, error) {
 	envPath := flag.String("env", "configs/example.env", "Path to env file")
 	flag.Parse()
 
-	if _, err := os.Stat(*envPath); err == nil {
-		if _, err := utils.LoadEnvFile(*envPath); err != nil {
-			utils.Warn("failed to load env file", utils.KV("path", *envPath), utils.KV("error", err))
+	if info, err := os.Stat(*envPath); err == nil {
+		if info.IsDir() {
+			return nil, fmt.Errorf("env path %s is a directory", *envPath)
 		}
+		if _, err := utils.LoadEnvFile(*envPath); err != nil {
+			return nil, fmt.Errorf("load env file %s: %w", *envPath, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("stat env file %s: %w", *envPath, err)
 	}
 
 	resolvedPath, err := utils.ResolveConfigPath(*configPath)
@@ -131,6 +119,10 @@ func loadConfig() (*Config, error) {
 	}
 
 	applyEnvOverrides(cfg)
+
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -176,6 +168,28 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.MCPRateLimitPerMinute = limit
 		}
 	}
+}
+
+func validateConfig(cfg *Config) error {
+	if cfg == nil {
+		return errors.New("config is nil")
+	}
+	if cfg.Port <= 0 || cfg.Port > 65535 {
+		return fmt.Errorf("invalid port: %d", cfg.Port)
+	}
+	if cfg.MCPPort <= 0 || cfg.MCPPort > 65535 {
+		return fmt.Errorf("invalid mcp_port: %d", cfg.MCPPort)
+	}
+	if cfg.HTTPRateLimitPerMinute < 0 {
+		return fmt.Errorf("invalid http_rate_limit_per_minute: %d", cfg.HTTPRateLimitPerMinute)
+	}
+	if cfg.MCPRateLimitPerMinute < 0 {
+		return fmt.Errorf("invalid mcp_rate_limit_per_minute: %d", cfg.MCPRateLimitPerMinute)
+	}
+	if strings.TrimSpace(cfg.LLMBaseURL) != "" && strings.TrimSpace(cfg.LLMAPIKey) == "" {
+		return errors.New("llm_api_key is required when llm_base_url is set; ensure the env file or config provides this value")
+	}
+	return nil
 }
 
 func initializeServices(config *Config) (*services.ThoughtExpander, *services.SessionManager, *services.LLMOrchestrator, error) {
@@ -320,11 +334,11 @@ func setupWebServer(cfg *Config, sessionManager *services.SessionManager, expand
 			payload.UserID = strings.TrimSpace(payload.UserID)
 			payload.Concept = strings.TrimSpace(payload.Concept)
 
-			if err := validateUserID(payload.UserID); err != nil {
+			if err := utils.ValidateUserID(payload.UserID); err != nil {
 				respondError(w, err)
 				return
 			}
-			if err := validateConcept(payload.Concept); err != nil {
+			if err := utils.ValidateConcept(payload.Concept); err != nil {
 				respondError(w, err)
 				return
 			}
@@ -342,7 +356,7 @@ func setupWebServer(cfg *Config, sessionManager *services.SessionManager, expand
 
 	mux.Handle("/api/sessions/", wrap(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/sessions/"))
-		if err := validateSessionID(id); err != nil {
+		if err := utils.ValidateSessionID(id); err != nil {
 			respondError(w, err)
 			return
 		}
@@ -362,7 +376,7 @@ func setupWebServer(cfg *Config, sessionManager *services.SessionManager, expand
 				respondError(w, err)
 				return
 			}
-			if err := validateDirection(&payload.Direction); err != nil {
+			if err := utils.ValidateDirection(&payload.Direction); err != nil {
 				respondError(w, err)
 				return
 			}
@@ -393,25 +407,24 @@ func setupWebServer(cfg *Config, sessionManager *services.SessionManager, expand
 		}
 
 		payload.Concept = strings.TrimSpace(payload.Concept)
-		if err := validateConcept(payload.Concept); err != nil {
+		if err := utils.ValidateConcept(payload.Concept); err != nil {
 			respondError(w, err)
 			return
 		}
 
-		normalizedContext, err := normalizeContext(payload.Context)
+		normalizedContext, err := utils.NormalizeContext(payload.Context)
 		if err != nil {
 			respondError(w, err)
 			return
 		}
 
-		expansionType := strings.ToLower(strings.TrimSpace(payload.ExpansionType))
-		if expansionType != "" {
-			dirType := models.DirectionType(expansionType)
-			if _, ok := allowedDirectionTypes[dirType]; !ok {
-				respondError(w, fmt.Errorf("%w: invalid expansion_type", appErrors.ErrInvalidRequest))
+		if trimmed := strings.TrimSpace(payload.ExpansionType); trimmed != "" {
+			dirType, err := utils.ParseDirectionType(trimmed)
+			if err != nil {
+				respondError(w, err)
 				return
 			}
-			payload.ExpansionType = expansionType
+			payload.ExpansionType = string(dirType)
 		} else {
 			payload.ExpansionType = ""
 		}
@@ -475,7 +488,7 @@ func statusFromError(err error) int {
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 	if r == nil || r.Body == nil {
-		return validationError("request body is empty")
+		return utils.ValidationError("request body is empty")
 	}
 
 	limited := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
@@ -486,119 +499,22 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) err
 
 	if err := decoder.Decode(dst); err != nil {
 		if errors.Is(err, io.EOF) {
-			return validationError("request body is empty")
+			return utils.ValidationError("request body is empty")
 		}
-		return fmt.Errorf("%w: %v", appErrors.ErrInvalidRequest, err)
+		var syntaxErr *json.SyntaxError
+		if errors.As(err, &syntaxErr) {
+			return utils.ValidationError(fmt.Sprintf("request body contains badly-formed JSON (at position %d)", syntaxErr.Offset))
+		}
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			return utils.ValidationError(fmt.Sprintf("request body has an invalid value for %q (expected %s)", typeErr.Field, typeErr.Type))
+		}
+		return utils.ValidationError("request body is invalid")
 	}
 
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return validationError("request body must contain a single JSON value")
+		return utils.ValidationError("request body must contain a single JSON value")
 	}
 
 	return nil
-}
-
-func validateConcept(concept string) error {
-	if concept == "" {
-		return validationError("concept is required")
-	}
-	if utf8.RuneCountInString(concept) > maxConceptLength {
-		return validationError("concept is too long")
-	}
-	return nil
-}
-
-func validateUserID(userID string) error {
-	if userID == "" {
-		return nil
-	}
-	if strings.ContainsAny(userID, " \t\r\n") {
-		return validationError("user_id must not contain whitespace")
-	}
-	if utf8.RuneCountInString(userID) > maxUserIDLength {
-		return validationError("user_id is too long")
-	}
-	return nil
-}
-
-func validateSessionID(id string) error {
-	if id == "" {
-		return validationError("session_id is required")
-	}
-	if strings.ContainsAny(id, " \t\r\n") {
-		return validationError("session_id must not contain whitespace")
-	}
-	if utf8.RuneCountInString(id) > maxSessionIDLength {
-		return validationError("session_id is too long")
-	}
-	return nil
-}
-
-func normalizeContext(items []string) ([]string, error) {
-	if len(items) > maxContextItems {
-		return nil, validationError("context has too many entries")
-	}
-	normalized := make([]string, 0, len(items))
-	for _, item := range items {
-		trimmed := strings.TrimSpace(item)
-		if trimmed == "" {
-			continue
-		}
-		if utf8.RuneCountInString(trimmed) > maxContextItemLength {
-			return nil, validationError("context item is too long")
-		}
-		normalized = append(normalized, trimmed)
-	}
-	return normalized, nil
-}
-
-func validateDirection(direction *models.Direction) error {
-	if direction == nil {
-		return validationError("direction is required")
-	}
-
-	dirType := models.DirectionType(strings.ToLower(strings.TrimSpace(string(direction.Type))))
-	if _, ok := allowedDirectionTypes[dirType]; !ok {
-		return validationError("direction.type is invalid")
-	}
-	direction.Type = dirType
-
-	direction.Title = strings.TrimSpace(direction.Title)
-	if direction.Title == "" {
-		return validationError("direction.title is required")
-	}
-	if utf8.RuneCountInString(direction.Title) > maxDirectionTitleLength {
-		return validationError("direction.title is too long")
-	}
-
-	direction.Description = strings.TrimSpace(direction.Description)
-	if utf8.RuneCountInString(direction.Description) > maxDirectionDescLength {
-		return validationError("direction.description is too long")
-	}
-
-	cleanedKeywords := make([]string, 0, len(direction.Keywords))
-	for _, keyword := range direction.Keywords {
-		trimmed := strings.TrimSpace(keyword)
-		if trimmed == "" {
-			continue
-		}
-		if utf8.RuneCountInString(trimmed) > maxKeywordLength {
-			return validationError("direction.keywords contains an entry that is too long")
-		}
-		cleanedKeywords = append(cleanedKeywords, trimmed)
-		if len(cleanedKeywords) > maxDirectionKeywords {
-			return validationError("direction.keywords has too many entries")
-		}
-	}
-	direction.Keywords = cleanedKeywords
-
-	if direction.Relevance < 0 || direction.Relevance > 1 {
-		return validationError("direction.relevance must be between 0 and 1")
-	}
-
-	return nil
-}
-
-func validationError(msg string) error {
-	return fmt.Errorf("%w: %s", appErrors.ErrInvalidRequest, msg)
 }
