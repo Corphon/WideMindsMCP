@@ -17,15 +17,15 @@ type ThoughtExpander struct {
 }
 
 type ExpansionRequest struct {
-	Concept       string
-	Context       []string
-	ExpansionType models.DirectionType
-	MaxDirections int
+	Concept       string               `json:"concept"`
+	Context       []string             `json:"context"`
+	ExpansionType models.DirectionType `json:"expansionType"`
+	MaxDirections int                  `json:"maxDirections"`
 }
 
 type ExpansionResult struct {
-	Directions []models.Direction
-	Thoughts   []*models.Thought
+	Directions []models.Direction `json:"directions"`
+	Thoughts   []*models.Thought  `json:"thoughts"`
 }
 
 // 函数
