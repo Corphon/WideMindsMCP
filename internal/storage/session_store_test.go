@@ -1,6 +1,9 @@
 package storage_test
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -47,6 +50,65 @@ func TestInMemorySessionStoreLifecycle(t *testing.T) {
 
 	if err := store.Delete(session.ID); err != nil {
 		t.Fatalf("delete failed: %v", err)
+	}
+}
+
+func TestFileSessionStoreIndexPersistence(t *testing.T) {
+	dataDir := t.TempDir()
+	store := storage.NewFileSessionStore(dataDir)
+	session := models.NewSession("persist-user", "思维导图")
+
+	if err := store.Save(session); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	indexPath := filepath.Join(dataDir, "index.json")
+	if _, err := os.Stat(indexPath); err != nil {
+		t.Fatalf("expected index file, got %v", err)
+	}
+
+	store = storage.NewFileSessionStore(dataDir)
+	sessions, err := store.GetByUserID("persist-user")
+	if err != nil {
+		t.Fatalf("get by user failed: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].ID != session.ID {
+		t.Fatalf("expected session id %s, got %s", session.ID, sessions[0].ID)
+	}
+}
+
+func TestFileSessionStoreIndexCorruptionRecovery(t *testing.T) {
+	dataDir := t.TempDir()
+	store := storage.NewFileSessionStore(dataDir)
+	session := models.NewSession("user", "纠错")
+
+	if err := store.Save(session); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	indexPath := filepath.Join(dataDir, "index.json")
+	if err := os.WriteFile(indexPath, []byte("not-json"), 0o644); err != nil {
+		t.Fatalf("corrupt index failed: %v", err)
+	}
+
+	store = storage.NewFileSessionStore(dataDir)
+	sessionsAfter, err := store.GetByUserID("user")
+	if err != nil {
+		t.Fatalf("get by user failed: %v", err)
+	}
+	if len(sessionsAfter) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessionsAfter))
+	}
+
+	raw, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("read index failed: %v", err)
+	}
+	if !json.Valid(raw) {
+		t.Fatalf("index file was not repaired")
 	}
 }
 
