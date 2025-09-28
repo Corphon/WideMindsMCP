@@ -344,6 +344,10 @@
 					expand: '展开',
 					nodeFallback: '节点',
 					noDirections: '暂未生成推荐方向。',
+					editNode: '编辑',
+					deleteNode: '删除',
+					editNodePrompt: '更新节点内容',
+					deleteNodeConfirm: '确认删除该节点及其所有子节点？此操作不可撤销。',
 				},
 				en: {
 					documentTitle: 'WideMinds Navigator',
@@ -379,6 +383,10 @@
 					expand: 'Expand',
 					nodeFallback: 'Node',
 					noDirections: 'No recommended directions yet.',
+					editNode: 'Edit',
+					deleteNode: 'Delete',
+					editNodePrompt: 'Update node content',
+					deleteNodeConfirm: 'Delete this node and all of its descendants? This cannot be undone.',
 				},
 			};
 
@@ -489,9 +497,28 @@
 					if (!res.ok) throw new Error(await res.text());
 					return res.json();
 				},
+				async updateThought(sessionId, thoughtId, payload) {
+					const res = await fetch(`/api/sessions/${sessionId}/thoughts/${thoughtId}`, {
+						method: 'PATCH',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify(payload),
+					});
+					if (!res.ok) throw new Error(await res.text());
+					return res.json();
+				},
+				async deleteThought(sessionId, thoughtId) {
+					const res = await fetch(`/api/sessions/${sessionId}/thoughts/${thoughtId}`, {
+						method: 'DELETE',
+					});
+					if (!res.ok) throw new Error(await res.text());
+					return res.json();
+				},
 			};
 
-			const tree = new ThoughtTree('thought-tree');
+			const tree = new ThoughtTree('thought-tree', {
+				onEdit: handleEditThought,
+				onDelete: handleDeleteThought,
+			});
 			const canvas = new InteractiveCanvas('mindmap-canvas', { tree });
 			const state = window.AppState;
 
@@ -568,6 +595,44 @@
 					canvas.render(session);
 				} catch (error) {
 					console.error(error);
+				}
+			}
+
+			async function handleEditThought(thought) {
+				const session = state.getActiveSession();
+				if (!session || !thought) {
+					return;
+				}
+				const promptLabel = i18n.t('editNodePrompt');
+				const nextContent = window.prompt(promptLabel, thought.content || '');
+				if (nextContent === null) {
+					return;
+				}
+				try {
+					const updated = await api.updateThought(session.id, thought.id, { content: nextContent });
+					await refreshSession(session.id);
+					tree.highlightPath(updated.id);
+				} catch (error) {
+					alert(error.message);
+				}
+			}
+
+			async function handleDeleteThought(thought) {
+				const session = state.getActiveSession();
+				if (!session || !thought) {
+					return;
+				}
+				if (!window.confirm(i18n.t('deleteNodeConfirm'))) {
+					return;
+				}
+				try {
+					const updatedSession = await api.deleteThought(session.id, thought.id);
+					state.setActiveSession(updatedSession);
+					tree.render(updatedSession);
+					canvas.render(updatedSession);
+					renderDirections(state.getLastExpansionResult(), { persist: false });
+				} catch (error) {
+					alert(error.message);
 				}
 			}
 
