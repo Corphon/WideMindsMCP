@@ -49,3 +49,38 @@ func TestInMemorySessionStoreLifecycle(t *testing.T) {
 		t.Fatalf("delete failed: %v", err)
 	}
 }
+
+func TestFileSessionStoreGetExpiredSessions(t *testing.T) {
+	dataDir := t.TempDir()
+	store := storage.NewFileSessionStore(dataDir)
+	now := time.Now().UTC()
+
+	oldSession := models.NewSession("user-old", "历史")
+	oldSession.CreatedAt = now.Add(-2 * time.Hour)
+	oldSession.UpdatedAt = now.Add(-2 * time.Hour)
+
+	if err := store.Save(oldSession); err != nil {
+		t.Fatalf("save old session failed: %v", err)
+	}
+
+	recentSession := models.NewSession("user-new", "最新")
+	recentSession.CreatedAt = now.Add(-30 * time.Minute)
+	recentSession.UpdatedAt = now.Add(-30 * time.Minute)
+
+	if err := store.Save(recentSession); err != nil {
+		t.Fatalf("save recent session failed: %v", err)
+	}
+
+	cutoff := now.Add(-1 * time.Hour)
+	expired, err := store.GetExpiredSessions(cutoff)
+	if err != nil {
+		t.Fatalf("get expired sessions failed: %v", err)
+	}
+
+	if len(expired) != 1 {
+		t.Fatalf("expected 1 expired session, got %d", len(expired))
+	}
+	if expired[0].ID != oldSession.ID {
+		t.Fatalf("expected expired session %s, got %s", oldSession.ID, expired[0].ID)
+	}
+}
