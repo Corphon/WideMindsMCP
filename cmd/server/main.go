@@ -213,6 +213,8 @@ func setupMCPServer(cfg *Config, te *services.ThoughtExpander, sm *services.Sess
 	server.RegisterTool("explore_direction", mcp.NewExploreDirectionTool(te))
 	server.RegisterTool("create_session", mcp.NewCreateSessionTool(sm))
 	server.RegisterTool("get_session", mcp.NewGetSessionTool(sm))
+	server.RegisterTool("update_thought", mcp.NewUpdateThoughtTool(sm))
+	server.RegisterTool("delete_thought", mcp.NewDeleteThoughtTool(sm))
 	return server
 }
 
@@ -355,14 +357,68 @@ func setupWebServer(cfg *Config, sessionManager *services.SessionManager, expand
 	}, true, true))
 
 	mux.Handle("/api/sessions/", wrap(func(w http.ResponseWriter, r *http.Request) {
-		id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/sessions/"))
-		if err := utils.ValidateSessionID(id); err != nil {
+		trimmed := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/sessions/"))
+		if trimmed == "" {
+			http.Error(w, "session id is required", http.StatusBadRequest)
+			return
+		}
+
+		parts := make([]string, 0)
+		for _, segment := range strings.Split(trimmed, "/") {
+			if segment = strings.TrimSpace(segment); segment != "" {
+				parts = append(parts, segment)
+			}
+		}
+		if len(parts) == 0 {
+			http.Error(w, "session id is required", http.StatusBadRequest)
+			return
+		}
+
+		sessionID := parts[0]
+		if err := utils.ValidateSessionID(sessionID); err != nil {
 			respondError(w, err)
 			return
 		}
+
+		if len(parts) >= 2 && parts[1] == "thoughts" {
+			if len(parts) < 3 {
+				http.Error(w, "thought id is required", http.StatusBadRequest)
+				return
+			}
+			thoughtID := parts[2]
+			switch r.Method {
+			case http.MethodPatch:
+				var payload models.ThoughtUpdate
+				if err := decodeJSONBody(w, r, &payload); err != nil {
+					respondError(w, err)
+					return
+				}
+				if err := utils.ValidateThoughtUpdate(&payload); err != nil {
+					respondError(w, err)
+					return
+				}
+				thought, err := sessionManager.UpdateThought(sessionID, thoughtID, &payload)
+				if err != nil {
+					respondError(w, err)
+					return
+				}
+				respondJSON(w, thought)
+			case http.MethodDelete:
+				session, err := sessionManager.DeleteThought(sessionID, thoughtID)
+				if err != nil {
+					respondError(w, err)
+					return
+				}
+				respondJSON(w, session)
+			default:
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
+
 		switch r.Method {
 		case http.MethodGet:
-			session, err := sessionManager.GetSession(id)
+			session, err := sessionManager.GetSession(sessionID)
 			if err != nil {
 				respondError(w, err)
 				return
@@ -380,7 +436,7 @@ func setupWebServer(cfg *Config, sessionManager *services.SessionManager, expand
 				respondError(w, err)
 				return
 			}
-			thought, err := expander.ExploreDirection(payload.Direction, id)
+			thought, err := expander.ExploreDirection(payload.Direction, sessionID)
 			if err != nil {
 				respondError(w, err)
 				return
