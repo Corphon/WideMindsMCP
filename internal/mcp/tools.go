@@ -37,6 +37,14 @@ type GetSessionTool struct {
 	manager *services.SessionManager
 }
 
+type ListSessionsTool struct {
+	manager *services.SessionManager
+}
+
+type DeleteSessionTool struct {
+	manager *services.SessionManager
+}
+
 type UpdateThoughtTool struct {
 	manager *services.SessionManager
 }
@@ -64,6 +72,14 @@ func NewCreateSessionTool(manager *services.SessionManager) MCPTool {
 
 func NewGetSessionTool(manager *services.SessionManager) MCPTool {
 	return &GetSessionTool{manager: manager}
+}
+
+func NewListSessionsTool(manager *services.SessionManager) MCPTool {
+	return &ListSessionsTool{manager: manager}
+}
+
+func NewDeleteSessionTool(manager *services.SessionManager) MCPTool {
+	return &DeleteSessionTool{manager: manager}
 }
 
 func NewUpdateThoughtTool(manager *services.SessionManager) MCPTool {
@@ -251,6 +267,67 @@ func (t *GetSessionTool) Execute(params map[string]interface{}) (interface{}, er
 }
 
 func (t *GetSessionTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"session_id": "string",
+	}
+}
+
+func (t *ListSessionsTool) Name() string {
+	return "list_sessions"
+}
+
+func (t *ListSessionsTool) Description() string {
+	return "List sessions for a user"
+}
+
+func (t *ListSessionsTool) Execute(params map[string]interface{}) (interface{}, error) {
+	if t.manager == nil {
+		return nil, errors.New("session manager not available")
+	}
+
+	userID := strings.TrimSpace(getString(params, "user_id"))
+	if userID == "" {
+		return nil, utils.ValidationError("user_id is required")
+	}
+	if err := utils.ValidateUserID(userID); err != nil {
+		return nil, err
+	}
+
+	return t.manager.ListSessions(userID)
+}
+
+func (t *ListSessionsTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"user_id": "string",
+	}
+}
+
+func (t *DeleteSessionTool) Name() string {
+	return "delete_session"
+}
+
+func (t *DeleteSessionTool) Description() string {
+	return "Delete a session by ID"
+}
+
+func (t *DeleteSessionTool) Execute(params map[string]interface{}) (interface{}, error) {
+	if t.manager == nil {
+		return nil, errors.New("session manager not available")
+	}
+
+	sessionID := strings.TrimSpace(getString(params, "session_id"))
+	if err := utils.ValidateSessionID(sessionID); err != nil {
+		return nil, err
+	}
+
+	if err := t.manager.DeleteSession(sessionID); err != nil {
+		return nil, err
+	}
+
+	return map[string]string{"status": "deleted", "session_id": sessionID}, nil
+}
+
+func (t *DeleteSessionTool) Schema() map[string]interface{} {
 	return map[string]interface{}{
 		"session_id": "string",
 	}
