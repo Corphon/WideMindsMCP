@@ -5,6 +5,8 @@ package services
 import (
 	"context"
 	"errors"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -186,8 +188,48 @@ func (sm *SessionManager) DeleteThought(sessionID, thoughtID string) (*models.Se
 	return session, nil
 }
 
+func (sm *SessionManager) ListSessions(userID string) ([]*models.Session, error) {
+	id := strings.TrimSpace(userID)
+	if id == "" {
+		return nil, appErrors.ErrInvalidRequest
+	}
+
+	sessions, err := sm.store.GetByUserID(id)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make([]*models.Session, 0, len(sessions))
+	for _, session := range sessions {
+		if session == nil {
+			continue
+		}
+		filtered = append(filtered, session)
+	}
+
+	sort.SliceStable(filtered, func(i, j int) bool {
+		left := filtered[i]
+		right := filtered[j]
+		if left == nil || right == nil {
+			return right != nil
+		}
+		// 默认按更新时间倒序
+		return left.UpdatedAt.After(right.UpdatedAt)
+	})
+
+	sm.mutex.Lock()
+	for _, session := range filtered {
+		if session != nil {
+			sm.cache[session.ID] = session
+		}
+	}
+	sm.mutex.Unlock()
+
+	return filtered, nil
+}
+
 func (sm *SessionManager) GetActiveSessionsByUser(userID string) ([]*models.Session, error) {
-	sessions, err := sm.store.GetByUserID(userID)
+	sessions, err := sm.ListSessions(userID)
 	if err != nil {
 		return nil, err
 	}
