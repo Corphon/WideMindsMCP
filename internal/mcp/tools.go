@@ -37,6 +37,14 @@ type GetSessionTool struct {
 	manager *services.SessionManager
 }
 
+type UpdateThoughtTool struct {
+	manager *services.SessionManager
+}
+
+type DeleteThoughtTool struct {
+	manager *services.SessionManager
+}
+
 const (
 	maxGeneratedDirections = 12
 )
@@ -56,6 +64,14 @@ func NewCreateSessionTool(manager *services.SessionManager) MCPTool {
 
 func NewGetSessionTool(manager *services.SessionManager) MCPTool {
 	return &GetSessionTool{manager: manager}
+}
+
+func NewUpdateThoughtTool(manager *services.SessionManager) MCPTool {
+	return &UpdateThoughtTool{manager: manager}
+}
+
+func NewDeleteThoughtTool(manager *services.SessionManager) MCPTool {
+	return &DeleteThoughtTool{manager: manager}
 }
 
 // ExpandThoughtTool方法
@@ -237,6 +253,101 @@ func (t *GetSessionTool) Execute(params map[string]interface{}) (interface{}, er
 func (t *GetSessionTool) Schema() map[string]interface{} {
 	return map[string]interface{}{
 		"session_id": "string",
+	}
+}
+
+func (t *UpdateThoughtTool) Name() string {
+	return "update_thought"
+}
+
+func (t *UpdateThoughtTool) Description() string {
+	return "Update the content or direction metadata of a thought node"
+}
+
+func (t *UpdateThoughtTool) Execute(params map[string]interface{}) (interface{}, error) {
+	if t.manager == nil {
+		return nil, errors.New("session manager not available")
+	}
+
+	sessionID := strings.TrimSpace(getString(params, "session_id"))
+	if err := utils.ValidateSessionID(sessionID); err != nil {
+		return nil, err
+	}
+
+	thoughtID := strings.TrimSpace(getString(params, "thought_id"))
+	if thoughtID == "" {
+		return nil, utils.ValidationError("thought_id is required")
+	}
+
+	update := &models.ThoughtUpdate{}
+	if _, ok := params["content"]; ok {
+		content := getString(params, "content")
+		update.Content = &content
+	}
+	if rawDir, ok := params["direction"]; ok {
+		dirMap, valid := rawDir.(map[string]interface{})
+		if !valid {
+			return nil, utils.ValidationError("direction must be an object")
+		}
+		direction, err := buildDirection(dirMap)
+		if err != nil {
+			return nil, err
+		}
+		update.Direction = direction
+	}
+
+	if err := utils.ValidateThoughtUpdate(update); err != nil {
+		return nil, err
+	}
+
+	return t.manager.UpdateThought(sessionID, thoughtID, update)
+}
+
+func (t *UpdateThoughtTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"session_id": "string",
+		"thought_id": "string",
+		"content":    "string",
+		"direction": map[string]interface{}{
+			"type":        "string",
+			"title":       "string",
+			"description": "string",
+			"keywords":    "array[string]",
+			"relevance":   "number",
+		},
+	}
+}
+
+func (t *DeleteThoughtTool) Name() string {
+	return "delete_thought"
+}
+
+func (t *DeleteThoughtTool) Description() string {
+	return "Delete a thought node from a session"
+}
+
+func (t *DeleteThoughtTool) Execute(params map[string]interface{}) (interface{}, error) {
+	if t.manager == nil {
+		return nil, errors.New("session manager not available")
+	}
+
+	sessionID := strings.TrimSpace(getString(params, "session_id"))
+	if err := utils.ValidateSessionID(sessionID); err != nil {
+		return nil, err
+	}
+
+	thoughtID := strings.TrimSpace(getString(params, "thought_id"))
+	if thoughtID == "" {
+		return nil, utils.ValidationError("thought_id is required")
+	}
+
+	return t.manager.DeleteThought(sessionID, thoughtID)
+}
+
+func (t *DeleteThoughtTool) Schema() map[string]interface{} {
+	return map[string]interface{}{
+		"session_id": "string",
+		"thought_id": "string",
 	}
 }
 
