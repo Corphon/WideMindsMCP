@@ -213,6 +213,8 @@ func setupMCPServer(cfg *Config, te *services.ThoughtExpander, sm *services.Sess
 	server.RegisterTool("explore_direction", mcp.NewExploreDirectionTool(te))
 	server.RegisterTool("create_session", mcp.NewCreateSessionTool(sm))
 	server.RegisterTool("get_session", mcp.NewGetSessionTool(sm))
+	server.RegisterTool("list_sessions", mcp.NewListSessionsTool(sm))
+	server.RegisterTool("delete_session", mcp.NewDeleteSessionTool(sm))
 	server.RegisterTool("update_thought", mcp.NewUpdateThoughtTool(sm))
 	server.RegisterTool("delete_thought", mcp.NewDeleteThoughtTool(sm))
 	return server
@@ -324,6 +326,22 @@ func setupWebServer(cfg *Config, sessionManager *services.SessionManager, expand
 
 	mux.Handle("/api/sessions", wrap(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
+		case http.MethodGet:
+			userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+			if userID == "" {
+				respondError(w, utils.ValidationError("user_id is required"))
+				return
+			}
+			if err := utils.ValidateUserID(userID); err != nil {
+				respondError(w, err)
+				return
+			}
+			sessions, err := sessionManager.ListSessions(userID)
+			if err != nil {
+				respondError(w, err)
+				return
+			}
+			respondJSON(w, sessions)
 		case http.MethodPost:
 			var payload struct {
 				UserID  string `json:"user_id"`
@@ -442,6 +460,12 @@ func setupWebServer(cfg *Config, sessionManager *services.SessionManager, expand
 				return
 			}
 			respondJSON(w, thought)
+		case http.MethodDelete:
+			if err := sessionManager.DeleteSession(sessionID); err != nil {
+				respondError(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
