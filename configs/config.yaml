@@ -6,3 +6,6 @@ llm_model: "gpt-4.1"
 data_dir: ""
 web_dir: "web"
 use_file_store: false
+api_token: ""
+http_rate_limit_per_minute: 120
+mcp_rate_limit_per_minute: 60
