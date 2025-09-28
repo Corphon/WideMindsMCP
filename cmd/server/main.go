@@ -64,19 +64,19 @@ var allowedDirectionTypes = map[models.DirectionType]struct{}{
 func main() {
 	cfg, err := loadConfig()
 	if err != nil {
-		utils.Errorf("failed to load config: %v", err)
+		utils.Error("failed to load config", utils.KV("error", err))
 		os.Exit(1)
 	}
 
 	thoughtExpander, sessionManager, err := initializeServices(cfg)
 	if err != nil {
-		utils.Errorf("failed to initialize services: %v", err)
+		utils.Error("failed to initialize services", utils.KV("error", err))
 		os.Exit(1)
 	}
 
 	mcpServer := setupMCPServer(cfg, thoughtExpander, sessionManager)
 	if err := mcpServer.Start(cfg.MCPPort); err != nil {
-		utils.Errorf("failed to start MCP server: %v", err)
+		utils.Error("failed to start MCP server", utils.KV("error", err))
 		os.Exit(1)
 	}
 
@@ -91,9 +91,9 @@ func main() {
 	}
 
 	go func() {
-		utils.Infof("web server listening on %s", webServer.Addr)
+		utils.Info("web server listening", utils.KV("addr", webServer.Addr))
 		if err := webServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			utils.Errorf("web server error: %v", err)
+			utils.Error("web server error", utils.KV("error", err))
 		}
 	}()
 
@@ -117,7 +117,7 @@ func loadConfig() (*Config, error) {
 
 	if _, err := os.Stat(*envPath); err == nil {
 		if _, err := utils.LoadEnvFile(*envPath); err != nil {
-			utils.Warnf("failed to load env file: %v", err)
+			utils.Warn("failed to load env file", utils.KV("path", *envPath), utils.KV("error", err))
 		}
 	}
 
@@ -381,17 +381,17 @@ func gracefulShutdown(mcpServer *mcp.MCPServer, webServer *http.Server) {
 	signal.Notify(shutdownCh, os.Interrupt, syscall.SIGTERM)
 
 	<-shutdownCh
-	utils.Warnf("shutdown signal received")
+	utils.Warn("shutdown signal received")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := webServer.Shutdown(ctx); err != nil {
-		utils.Errorf("failed to shutdown web server: %v", err)
+		utils.Error("failed to shutdown web server", utils.KV("error", err))
 	}
 
 	if err := mcpServer.Shutdown(); err != nil {
-		utils.Errorf("failed to shutdown MCP server: %v", err)
+		utils.Error("failed to shutdown MCP server", utils.KV("error", err))
 	}
 }
 
