@@ -3,22 +3,33 @@
 package services
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"strings"
 	"time"
 
 	"WideMindsMCP/internal/models"
+	"WideMindsMCP/internal/utils"
 )
 
 // Struct definitions
 type LLMOrchestrator struct {
-	apiKey    string
-	baseURL   string
-	model     string
-	maxTokens int
+	apiKey     string
+	baseURL    string
+	model      string
+	maxTokens  int
+	httpClient *http.Client
+	timeout    time.Duration
+}
+
+func (llm *LLMOrchestrator) hasRemoteBackend() bool {
+	return llm != nil && llm.baseURL != "" && llm.httpClient != nil
 }
 
 type LLMRequest struct {
@@ -73,10 +84,12 @@ func NewLLMOrchestrator(apiKey, baseURL, model string) *LLMOrchestrator {
 	}
 
 	return &LLMOrchestrator{
-		apiKey:    apiKey,
-		baseURL:   baseURL,
-		model:     model,
-		maxTokens: 32768,
+		apiKey:     apiKey,
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		model:      model,
+		maxTokens:  32768,
+		httpClient: &http.Client{Timeout: 15 * time.Second},
+		timeout:    15 * time.Second,
 	}
 }
 
@@ -95,36 +108,25 @@ func (llm *LLMOrchestrator) GenerateThoughtDirections(concept string, context []
 	}
 
 	prompt := llm.BuildPrompt(concept, normalizedContext, "directions")
-	_ = prompt // placeholder for future real LLM call
-
-	baseKeywords := strings.Fields(strings.ToLower(concept))
-	keywords := append(normalizedContext, baseKeywords...)
-
-	directionTemplates := []struct {
-		dirType models.DirectionType
-		title   string
-		descFmt string
-	}{
-		{models.Broad, "Macro Overview", "Map the overall structure and key components of %v from a macro perspective."},
-		{models.Deep, "Technical Deep Dive", "Explore the critical technical details and underlying principles of %v in depth."},
-		{models.Lateral, "Cross-domain Associations", "Identify lateral connections between %v and other disciplines, industries, or mental models."},
-		{models.Critical, "Critical Reflection", "Assess the potential risks, blind spots, and areas for improvement when applying %v in practice."},
-	}
-
-	directions := make([]models.Direction, 0, len(directionTemplates))
-	for i, tpl := range directionTemplates {
-		desc := fmt.Sprintf(tpl.descFmt, concept)
-		dir := models.Direction{
-			Type:        tpl.dirType,
-			Title:       tpl.title,
-			Description: desc,
-			Keywords:    uniqueStrings(keywords),
-			Relevance:   math.Max(0.3, 1.0-0.1*float64(i)),
+	if llm.hasRemoteBackend() {
+		resp, err := llm.CallLLM(&LLMRequest{
+			Prompt:      prompt,
+			Context:     normalizedContext,
+			Temperature: 0.7,
+			MaxTokens:   1024,
+		})
+		if err != nil {
+			utils.Warn("LLM call failed while generating directions", utils.KV("error", err))
+		} else if resp != nil {
+			if directions, parseErr := llm.parseDirectionsFromContent(resp.Content); parseErr != nil {
+				utils.Warn("failed to parse LLM directions response", utils.KV("error", parseErr))
+			} else if len(directions) > 0 {
+				return directions, nil
+			}
 		}
-		directions = append(directions, dir)
 	}
 
-	return directions, nil
+	return llm.generateFallbackDirections(concept, normalizedContext), nil
 }
 
 func (llm *LLMOrchestrator) ExploreDirection(direction models.Direction, depth int) ([]*models.Thought, error) {
@@ -144,30 +146,166 @@ func (llm *LLMOrchestrator) ExploreDirection(direction models.Direction, depth i
 }
 
 func (llm *LLMOrchestrator) CallLLM(req *LLMRequest) (*LLMResponse, error) {
+	if llm == nil {
+		return nil, errors.New("llm orchestrator is nil")
+	}
+
 	if req == nil {
 		return nil, errors.New("request is nil")
 	}
 
-	if req.Prompt == "" {
+	prompt := strings.TrimSpace(req.Prompt)
+	if prompt == "" {
 		return nil, errors.New("prompt is empty")
 	}
 
-	if req.MaxTokens == 0 {
-		req.MaxTokens = llm.maxTokens
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = int(math.Min(float64(llm.maxTokens), 2048))
+	} else if maxTokens > llm.maxTokens {
+		maxTokens = llm.maxTokens
 	}
 
-	summary := truncate(req.Prompt, 512)
+	temperature := req.Temperature
+	if temperature <= 0 {
+		temperature = 0.7
+	}
+	temperature = math.Max(0, math.Min(temperature, 2))
+
+	if !llm.hasRemoteBackend() {
+		return llm.localLLMResponse(prompt, maxTokens), nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), llm.timeout)
+	defer cancel()
+
+	userContent := prompt
+	if len(req.Context) > 0 {
+		var sb strings.Builder
+		sb.Grow(len(prompt) + 128)
+		sb.WriteString(prompt)
+		sb.WriteString("\n\nContext:\n")
+		for _, entry := range uniqueStrings(req.Context) {
+			sb.WriteString("- ")
+			sb.WriteString(entry)
+			sb.WriteString("\n")
+		}
+		userContent = strings.TrimSpace(sb.String())
+	}
+
+	payload := map[string]any{
+		"model": llm.model,
+		"messages": []map[string]string{
+			{"role": "system", "content": "You are an assistant that returns valid JSON matching the user's instructions."},
+			{"role": "user", "content": userContent},
+		},
+		"max_tokens":  maxTokens,
+		"temperature": temperature,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal llm payload: %w", err)
+	}
+
+	endpoint := llm.baseURL
+	if !strings.HasSuffix(endpoint, "/v1/chat/completions") {
+		endpoint = strings.TrimRight(endpoint, "/") + "/v1/chat/completions"
+	}
+
+	reqHTTP, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("new http request: %w", err)
+	}
+	reqHTTP.Header.Set("Content-Type", "application/json")
+	if llm.apiKey != "" {
+		reqHTTP.Header.Set("Authorization", "Bearer "+llm.apiKey)
+	}
+
+	resp, err := llm.httpClient.Do(reqHTTP)
+	if err != nil {
+		return nil, fmt.Errorf("llm request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("read llm response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		snippet := truncate(string(raw), 512)
+		return nil, fmt.Errorf("llm http %d: %s", resp.StatusCode, snippet)
+	}
+
+	var parsed struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Index   int `json:"index"`
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+			Text string `json:"text"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("decode llm response: %w", err)
+	}
+
+	if len(parsed.Choices) == 0 {
+		return nil, errors.New("llm response missing choices")
+	}
+
+	content := strings.TrimSpace(parsed.Choices[0].Message.Content)
+	if content == "" {
+		content = strings.TrimSpace(parsed.Choices[0].Text)
+	}
+	if content == "" {
+		return nil, errors.New("llm response empty")
+	}
+
+	usage := TokenUsage{
+		PromptTokens:     parsed.Usage.PromptTokens,
+		CompletionTokens: parsed.Usage.CompletionTokens,
+		TotalTokens:      parsed.Usage.TotalTokens,
+	}
+
+	model := parsed.Model
+	if model == "" {
+		model = llm.model
+	}
+
+	return &LLMResponse{
+		Content:   content,
+		Usage:     usage,
+		Model:     model,
+		Timestamp: time.Now().UTC(),
+	}, nil
+}
+
+func (llm *LLMOrchestrator) localLLMResponse(prompt string, maxTokens int) *LLMResponse {
+	summary := truncate(prompt, maxTokens)
+	promptTokens := len(strings.Fields(prompt))
+	completionTokens := len(strings.Fields(summary))
 
 	return &LLMResponse{
 		Content: summary,
 		Usage: TokenUsage{
-			PromptTokens:     len(strings.Fields(req.Prompt)),
-			CompletionTokens: len(strings.Fields(summary)),
-			TotalTokens:      len(strings.Fields(req.Prompt)) + len(strings.Fields(summary)),
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
 		},
 		Model:     llm.model,
 		Timestamp: time.Now().UTC(),
-	}, nil
+	}
 }
 
 func (llm *LLMOrchestrator) HealthCheck(ctx context.Context) error {
@@ -448,6 +586,168 @@ func uniqueStrings(values []string) []string {
 		result = append(result, normalized)
 	}
 	return result
+}
+
+func (llm *LLMOrchestrator) parseDirectionsFromContent(content string) ([]models.Direction, error) {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return nil, errors.New("llm response empty")
+	}
+
+	start := strings.Index(trimmed, "[")
+	end := strings.LastIndex(trimmed, "]")
+	if start >= 0 && end > start {
+		trimmed = trimmed[start : end+1]
+	}
+
+	var raw []struct {
+		Type                string   `json:"type"`
+		Title               string   `json:"title"`
+		Summary             string   `json:"summary"`
+		Description         string   `json:"description"`
+		DirectionRationale  string   `json:"direction_rationale"`
+		KeyQuestions        []string `json:"key_questions"`
+		RecommendedActions  []string `json:"recommended_actions"`
+		Keywords            []string `json:"keywords"`
+		Relevance           float64  `json:"relevance"`
+		Confidence          float64  `json:"confidence"`
+		Importance          float64  `json:"importance"`
+		SuggestedRelevance  float64  `json:"suggested_relevance"`
+		SuggestedConfidence float64  `json:"suggested_confidence"`
+	}
+
+	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
+		return nil, fmt.Errorf("parse llm directions: %w", err)
+	}
+
+	results := make([]models.Direction, 0, len(raw))
+	for _, item := range raw {
+		title := strings.TrimSpace(item.Title)
+		description := strings.TrimSpace(item.Description)
+		if description == "" {
+			description = strings.TrimSpace(item.Summary)
+		}
+		if title == "" || description == "" {
+			continue
+		}
+
+		typeStr := strings.ToLower(strings.TrimSpace(item.Type))
+		var dirType models.DirectionType
+		switch typeStr {
+		case string(models.Broad), "overview", "expansion":
+			dirType = models.Broad
+		case string(models.Deep), "deepen", "analysis":
+			dirType = models.Deep
+		case string(models.Lateral), "adjacent":
+			dirType = models.Lateral
+		case string(models.Critical), "challenge":
+			dirType = models.Critical
+		default:
+			dirType = models.Broad
+		}
+
+		keywords := uniqueStrings(append(append([]string{}, item.Keywords...), item.KeyQuestions...))
+		if len(keywords) == 0 && item.DirectionRationale != "" {
+			keywords = append(keywords, truncate(item.DirectionRationale, 64))
+		}
+		keywords = uniqueStrings(keywords)
+
+		relevance := item.Relevance
+		if relevance == 0 {
+			relevance = item.Confidence
+		}
+		if relevance == 0 {
+			relevance = item.Importance
+		}
+		if relevance == 0 {
+			relevance = item.SuggestedRelevance
+		}
+		if relevance == 0 {
+			relevance = item.SuggestedConfidence
+		}
+		relevance = math.Max(0, math.Min(relevance, 1))
+		if relevance == 0 {
+			relevance = 0.7
+		}
+
+		direction := models.Direction{
+			Type:        dirType,
+			Title:       title,
+			Description: description,
+			Keywords:    keywords,
+			Relevance:   relevance,
+		}
+		results = append(results, direction)
+	}
+
+	if len(results) == 0 {
+		return nil, errors.New("no valid directions returned")
+	}
+
+	return results, nil
+}
+
+func (llm *LLMOrchestrator) generateFallbackDirections(concept string, context []string) []models.Direction {
+	concept = strings.TrimSpace(concept)
+	if concept == "" {
+		concept = "the topic"
+	}
+
+	keyTopics := uniqueStrings(context)
+	if len(keyTopics) == 0 {
+		keyTopics = []string{concept}
+	}
+
+	baseRelevance := 0.65 + math.Min(float64(len(keyTopics))*0.03, 0.25)
+
+	plans := []struct {
+		dirType models.DirectionType
+		title   string
+		desc    string
+		keys    []string
+	}{
+		{
+			dirType: models.Broad,
+			title:   fmt.Sprintf("Mapping the %s landscape", concept),
+			desc:    fmt.Sprintf("Survey the primary themes, actors, and trends that define %s today.", concept),
+			keys:    append([]string{"overview", concept}, keyTopics...),
+		},
+		{
+			dirType: models.Deep,
+			title:   fmt.Sprintf("Deep dive into core mechanics of %s", concept),
+			desc:    fmt.Sprintf("Analyze foundational principles, frameworks, and edge cases that underpin %s.", concept),
+			keys:    append([]string{"analysis", "core principles"}, keyTopics...),
+		},
+		{
+			dirType: models.Lateral,
+			title:   fmt.Sprintf("Adjacent inspirations for %s", concept),
+			desc:    fmt.Sprintf("Explore parallels from neighboring domains to reframe assumptions about %s.", concept),
+			keys:    append([]string{"analogy", "cross-domain"}, keyTopics...),
+		},
+		{
+			dirType: models.Critical,
+			title:   fmt.Sprintf("Stress-testing %s assumptions", concept),
+			desc:    fmt.Sprintf("Identify risks, limitations, and unresolved questions to make %s plans more robust.", concept),
+			keys:    append([]string{"risks", "open questions"}, keyTopics...),
+		},
+	}
+
+	results := make([]models.Direction, 0, len(plans))
+	for i, plan := range plans {
+		if i >= 3 && len(context) < 3 {
+			break
+		}
+		d := models.Direction{
+			Type:        plan.dirType,
+			Title:       plan.title,
+			Description: plan.desc,
+			Keywords:    uniqueStrings(plan.keys),
+			Relevance:   math.Min(1, baseRelevance-0.05*float64(i)),
+		}
+		results = append(results, d)
+	}
+
+	return results
 }
 
 func truncate(input string, max int) string {
