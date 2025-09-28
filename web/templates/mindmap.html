@@ -71,6 +71,62 @@
 				color: #7eaaff;
 			}
 
+			.history-header {
+				display: flex;
+				justify-content: space-between;
+				align-items: center;
+				gap: 12px;
+				margin-bottom: 12px;
+			}
+
+			.session-history {
+				display: flex;
+				flex-direction: column;
+				gap: 10px;
+			}
+
+			.session-item {
+				display: flex;
+				justify-content: space-between;
+				align-items: center;
+				gap: 12px;
+				padding: 12px;
+				border-radius: 12px;
+				background: rgba(23, 30, 49, 0.5);
+				border: 1px solid rgba(110, 141, 255, 0.18);
+			}
+
+			.session-item.active {
+				border-color: rgba(126, 170, 255, 0.6);
+				background: rgba(126, 170, 255, 0.2);
+			}
+
+			.session-info {
+				display: flex;
+				flex-direction: column;
+				gap: 4px;
+				font-size: 13px;
+			}
+
+			.session-title {
+				font-weight: 600;
+			}
+
+			.session-meta {
+				opacity: 0.65;
+				font-size: 12px;
+			}
+
+			.session-actions {
+				display: flex;
+				gap: 8px;
+			}
+
+			.history-empty {
+				font-size: 13px;
+				opacity: 0.65;
+			}
+
 			.form-group {
 				display: flex;
 				flex-direction: column;
@@ -284,6 +340,15 @@
 					<button type="submit" class="primary" id="expand-button" data-i18n="generateDirections">生成扩散方向</button>
 				</form>
 
+				<div class="card" style="margin-top: 24px" id="session-history-card">
+					<div class="history-header">
+						<h2 data-i18n="sessionHistory">历史会话</h2>
+						<button id="refresh-sessions" class="secondary" data-i18n="refreshSessions">刷新</button>
+					</div>
+					<div class="history-empty" id="session-history-empty" data-i18n="noSessions">暂无历史会话。</div>
+					<div id="session-list" class="session-history"></div>
+				</div>
+
 				<div class="card" style="margin-top: 24px">
 					<h2 data-i18n="recommendedHeading">推荐方向</h2>
 					<div id="directions" class="directions-list"></div>
@@ -348,6 +413,16 @@
 					deleteNode: '删除',
 					editNodePrompt: '更新节点内容',
 					deleteNodeConfirm: '确认删除该节点及其所有子节点？此操作不可撤销。',
+					sessionHistory: '历史会话',
+					refreshSessions: '刷新',
+					noSessions: '暂无历史会话。',
+					loadSession: '加载',
+					deleteSessionAction: '删除',
+					userIdRequiredForHistory: '请先填写用户 ID 以加载历史会话。',
+					deleteSessionConfirm: '确认删除该会话及其所有节点？此操作不可撤销。',
+					lastUpdated: '最近更新',
+					activeStatus: '进行中',
+					inactiveStatus: '已关闭',
 				},
 				en: {
 					documentTitle: 'WideMinds Navigator',
@@ -387,6 +462,16 @@
 					deleteNode: 'Delete',
 					editNodePrompt: 'Update node content',
 					deleteNodeConfirm: 'Delete this node and all of its descendants? This cannot be undone.',
+					sessionHistory: 'Session history',
+					refreshSessions: 'Refresh',
+					noSessions: 'No sessions yet.',
+					loadSession: 'Load',
+					deleteSessionAction: 'Delete',
+					userIdRequiredForHistory: 'Enter a user ID to load session history.',
+					deleteSessionConfirm: 'Delete this session and all stored thoughts? This cannot be undone.',
+					lastUpdated: 'Last updated',
+					activeStatus: 'Active',
+					inactiveStatus: 'Closed',
 				},
 			};
 
@@ -497,6 +582,17 @@
 					if (!res.ok) throw new Error(await res.text());
 					return res.json();
 				},
+				async listSessions(userId) {
+					const res = await fetch(`/api/sessions?user_id=${encodeURIComponent(userId)}`);
+					if (!res.ok) throw new Error(await res.text());
+					return res.json();
+				},
+				async deleteSession(sessionId) {
+					const res = await fetch(`/api/sessions/${sessionId}`, {
+						method: 'DELETE',
+					});
+					if (!res.ok) throw new Error(await res.text());
+				},
 				async updateThought(sessionId, thoughtId, payload) {
 					const res = await fetch(`/api/sessions/${sessionId}/thoughts/${thoughtId}`, {
 						method: 'PATCH',
@@ -522,6 +618,24 @@
 			const canvas = new InteractiveCanvas('mindmap-canvas', { tree });
 			const state = window.AppState;
 
+			let sessionHistory = [];
+			const sessionListContainer = document.getElementById('session-list');
+			const sessionEmptyState = document.getElementById('session-history-empty');
+			const refreshSessionsButton = document.getElementById('refresh-sessions');
+			const userIdInput = document.getElementById('user-id');
+
+			if (refreshSessionsButton) {
+				refreshSessionsButton.addEventListener('click', () => {
+					loadSessionHistory();
+				});
+			}
+
+			if (userIdInput) {
+				userIdInput.addEventListener('change', () => {
+					loadSessionHistory({ silent: true });
+				});
+			}
+
 			const languageToggle = document.getElementById('language-toggle');
 			languageToggle.addEventListener('click', () => {
 				const nextLanguage = i18n.getLanguage() === 'zh' ? 'en' : 'zh';
@@ -533,6 +647,124 @@
 					.split(/\n+/)
 					.map((line) => line.trim())
 					.filter(Boolean);
+			}
+
+			function renderSessionHistory(list = sessionHistory) {
+				if (!sessionListContainer || !sessionEmptyState) return;
+
+				sessionListContainer.innerHTML = '';
+				const activeSession = state.getActiveSession();
+
+				if (!Array.isArray(list) || list.length === 0) {
+					sessionEmptyState.style.display = '';
+					return;
+				}
+
+				sessionEmptyState.style.display = 'none';
+
+				list.forEach((session) => {
+					if (!session) return;
+					const item = document.createElement('div');
+					item.classList.add('session-item');
+					if (activeSession && session.id === activeSession.id) {
+						item.classList.add('active');
+					}
+
+					const info = document.createElement('div');
+					info.classList.add('session-info');
+
+					const title = document.createElement('div');
+					title.classList.add('session-title');
+					title.textContent = session.rootThought?.content || i18n.t('nodeFallback');
+					info.appendChild(title);
+
+					const metaParts = [];
+					if (session.updatedAt) {
+						const locale = i18n.getLanguage() === 'zh' ? 'zh-CN' : 'en-US';
+						const formatted = new Date(session.updatedAt).toLocaleString(locale);
+						metaParts.push(`${i18n.t('lastUpdated')} ${formatted}`);
+					}
+					metaParts.push(session.isActive ? i18n.t('activeStatus') : i18n.t('inactiveStatus'));
+					const meta = document.createElement('div');
+					meta.classList.add('session-meta');
+					meta.textContent = metaParts.join(' · ');
+					info.appendChild(meta);
+
+					const actions = document.createElement('div');
+					actions.classList.add('session-actions');
+
+					const loadBtn = document.createElement('button');
+					loadBtn.classList.add('secondary');
+					loadBtn.textContent = i18n.t('loadSession');
+					loadBtn.addEventListener('click', () => handleLoadSession(session.id));
+
+					const deleteBtn = document.createElement('button');
+					deleteBtn.classList.add('secondary');
+					deleteBtn.textContent = i18n.t('deleteSessionAction');
+					deleteBtn.addEventListener('click', () => handleDeleteSession(session.id));
+
+					actions.appendChild(loadBtn);
+					actions.appendChild(deleteBtn);
+
+					item.appendChild(info);
+					item.appendChild(actions);
+					sessionListContainer.appendChild(item);
+				});
+			}
+
+			async function loadSessionHistory(options = {}) {
+				const { silent = false } = options;
+				if (!userIdInput) {
+					return;
+				}
+				const userId = userIdInput.value.trim();
+				if (!userId) {
+					sessionHistory = [];
+					renderSessionHistory();
+					if (!silent) {
+						alert(i18n.t('userIdRequiredForHistory'));
+					}
+					return;
+				}
+				try {
+					const sessions = await api.listSessions(userId);
+					sessionHistory = Array.isArray(sessions) ? sessions : [];
+					renderSessionHistory();
+				} catch (error) {
+					if (!silent) {
+						alert(error.message);
+					}
+				}
+			}
+
+			async function handleLoadSession(sessionId) {
+				if (!sessionId) return;
+				try {
+					await refreshSession(sessionId);
+					renderSessionHistory();
+				} catch (error) {
+					alert(error.message);
+				}
+			}
+
+			async function handleDeleteSession(sessionId) {
+				if (!sessionId) return;
+				if (!window.confirm(i18n.t('deleteSessionConfirm'))) {
+					return;
+				}
+				try {
+					await api.deleteSession(sessionId);
+					const activeSession = state.getActiveSession();
+					if (activeSession && activeSession.id === sessionId) {
+						state.reset();
+						tree.render(null);
+						canvas.clear();
+						renderDirections(null);
+					}
+					await loadSessionHistory({ silent: true });
+				} catch (error) {
+					alert(error.message);
+				}
 			}
 
 			function renderDirections(result, options = {}) {
@@ -593,6 +825,7 @@
 					state.setActiveSession(session);
 					tree.render(session);
 					canvas.render(session);
+					renderSessionHistory();
 				} catch (error) {
 					console.error(error);
 				}
@@ -630,6 +863,7 @@
 					state.setActiveSession(updatedSession);
 					tree.render(updatedSession);
 					canvas.render(updatedSession);
+					renderSessionHistory();
 					renderDirections(state.getLastExpansionResult(), { persist: false });
 				} catch (error) {
 					alert(error.message);
@@ -653,9 +887,11 @@
 					state.setActiveSession(session);
 					tree.render(session);
 					canvas.render(session);
+					renderSessionHistory();
 
 					const directions = await api.expand(concept, context, expansionType);
 					renderDirections(directions);
+					await loadSessionHistory({ silent: true });
 				} catch (error) {
 					alert(error.message);
 				}
@@ -666,10 +902,12 @@
 				tree.render(null);
 				canvas.clear();
 				renderDirections(null);
+				renderSessionHistory();
 			});
 
 			i18n.onChange(() => {
 				renderDirections(state.getLastExpansionResult(), { persist: false });
+				renderSessionHistory();
 				const session = state.getActiveSession();
 				if (session) {
 					tree.render(session);
@@ -681,6 +919,7 @@
 			});
 
 			i18n.setLanguage(i18n.getLanguage(), { persist: false });
+			renderSessionHistory();
 
 			canvas.initialize();
 		</script>
