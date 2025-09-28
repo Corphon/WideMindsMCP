@@ -68,7 +68,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	thoughtExpander, sessionManager, err := initializeServices(cfg)
+	thoughtExpander, sessionManager, llm, err := initializeServices(cfg)
 	if err != nil {
 		utils.Error("failed to initialize services", utils.KV("error", err))
 		os.Exit(1)
@@ -80,7 +80,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	webMux := setupWebServer(cfg, sessionManager, thoughtExpander)
+	webMux := setupWebServer(cfg, sessionManager, thoughtExpander, llm)
 	webServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           webMux,
@@ -178,7 +178,7 @@ func applyEnvOverrides(cfg *Config) {
 	}
 }
 
-func initializeServices(config *Config) (*services.ThoughtExpander, *services.SessionManager, error) {
+func initializeServices(config *Config) (*services.ThoughtExpander, *services.SessionManager, *services.LLMOrchestrator, error) {
 	var sessionStore storage.SessionStore
 	if config.UseFileStore || config.DataDir != "" {
 		sessionStore = storage.NewFileSessionStore(config.DataDir)
@@ -190,7 +190,7 @@ func initializeServices(config *Config) (*services.ThoughtExpander, *services.Se
 	llm := services.NewLLMOrchestrator(config.LLMAPIKey, config.LLMBaseURL, config.LLMModel)
 	expander := services.NewThoughtExpander(llm, sessionManager)
 
-	return expander, sessionManager, nil
+	return expander, sessionManager, llm, nil
 }
 
 func setupMCPServer(cfg *Config, te *services.ThoughtExpander, sm *services.SessionManager) *mcp.MCPServer {
@@ -202,7 +202,7 @@ func setupMCPServer(cfg *Config, te *services.ThoughtExpander, sm *services.Sess
 	return server
 }
 
-func setupWebServer(cfg *Config, sessionManager *services.SessionManager, expander *services.ThoughtExpander) *http.ServeMux {
+func setupWebServer(cfg *Config, sessionManager *services.SessionManager, expander *services.ThoughtExpander, llm *services.LLMOrchestrator) *http.ServeMux {
 	webDir := cfg.WebDir
 	if webDir == "" {
 		webDir = "web"
@@ -217,9 +217,64 @@ func setupWebServer(cfg *Config, sessionManager *services.SessionManager, expand
 		http.ServeFile(w, r, templatePath)
 	})
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
+	livenessResponder := func(w http.ResponseWriter, status string) {
+		w.Header().Set("Content-Type", "application/json")
+		response := map[string]interface{}{
+			"status":    status,
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}
+
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) {
+		livenessResponder(w, "ok")
 	})
+
+	readinessHandler := func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		statusCode := http.StatusOK
+		dependencies := map[string]string{}
+
+		if sessionManager == nil {
+			statusCode = http.StatusServiceUnavailable
+			dependencies["session_store"] = "missing session manager"
+		} else if err := sessionManager.HealthCheck(ctx); err != nil {
+			statusCode = http.StatusServiceUnavailable
+			dependencies["session_store"] = err.Error()
+		} else {
+			dependencies["session_store"] = "ok"
+		}
+
+		if llm == nil {
+			statusCode = http.StatusServiceUnavailable
+			dependencies["llm_orchestrator"] = "missing orchestrator"
+		} else if err := llm.HealthCheck(ctx); err != nil {
+			statusCode = http.StatusServiceUnavailable
+			dependencies["llm_orchestrator"] = err.Error()
+		} else {
+			dependencies["llm_orchestrator"] = "ok"
+		}
+
+		statusLabel := "ok"
+		if statusCode != http.StatusOK {
+			statusLabel = "unavailable"
+		}
+
+		payload := map[string]interface{}{
+			"status":       statusLabel,
+			"dependencies": dependencies,
+			"timestamp":    time.Now().UTC().Format(time.RFC3339),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		_ = json.NewEncoder(w).Encode(payload)
+	}
+
+	mux.HandleFunc("/healthz", readinessHandler)
+	mux.HandleFunc("/readyz", readinessHandler)
 
 	rateLimiter := utils.NewRateLimiter(cfg.HTTPRateLimitPerMinute, time.Minute)
 
