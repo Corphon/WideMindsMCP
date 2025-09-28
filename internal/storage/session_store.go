@@ -36,9 +36,14 @@ type InMemorySessionStore struct {
 }
 
 type FileSessionStore struct {
-	dataDir   string
-	mutex     sync.RWMutex
-	userIndex map[string]map[string]struct{}
+	dataDir      string
+	mutex        sync.RWMutex
+	userIndex    map[string]map[string]struct{}
+	sessionIndex map[string]sessionMetadata
+}
+
+type sessionMetadata struct {
+	UpdatedAt time.Time
 }
 
 // 函数
@@ -62,8 +67,9 @@ func NewFileSessionStore(dataDir string) SessionStore {
 	}
 
 	store := &FileSessionStore{
-		dataDir:   dataDir,
-		userIndex: make(map[string]map[string]struct{}),
+		dataDir:      dataDir,
+		userIndex:    make(map[string]map[string]struct{}),
+		sessionIndex: make(map[string]sessionMetadata),
 	}
 
 	if err := store.buildIndex(); err != nil {
@@ -89,6 +95,7 @@ func (store *FileSessionStore) buildIndex() error {
 	defer store.mutex.Unlock()
 
 	store.userIndex = make(map[string]map[string]struct{})
+	store.sessionIndex = make(map[string]sessionMetadata)
 
 	err := filepath.WalkDir(store.dataDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -280,33 +287,38 @@ func (store *FileSessionStore) GetByUserID(userID string) ([]*models.Session, er
 }
 
 func (store *FileSessionStore) GetExpiredSessions(before time.Time) ([]*models.Session, error) {
-	sessions := make([]*models.Session, 0)
-	err := filepath.WalkDir(store.dataDir, func(path string, d fs.DirEntry, err error) error {
+	store.mutex.RLock()
+	if store.sessionIndex == nil {
+		store.mutex.RUnlock()
+		return []*models.Session{}, nil
+	}
+	candidateIDs := make([]string, 0, len(store.sessionIndex))
+	for id, meta := range store.sessionIndex {
+		if meta.UpdatedAt.IsZero() || meta.UpdatedAt.Before(before) {
+			candidateIDs = append(candidateIDs, id)
+		}
+	}
+	store.mutex.RUnlock()
+
+	if len(candidateIDs) == 0 {
+		return []*models.Session{}, nil
+	}
+
+	result := make([]*models.Session, 0, len(candidateIDs))
+	for _, id := range candidateIDs {
+		session, err := store.Get(id)
 		if err != nil {
-			return err
+			if errors.Is(err, appErrors.ErrSessionNotFound) {
+				continue
+			}
+			return nil, err
 		}
-
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
-			return nil
-		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-
-		session, err := decodeSession(data)
-		if err != nil {
-			return err
-		}
-
 		if session.UpdatedAt.Before(before) {
-			sessions = append(sessions, session)
+			result = append(result, session)
 		}
-		return nil
-	})
+	}
 
-	return sessions, err
+	return result, nil
 }
 
 func (store *FileSessionStore) sessionPath(sessionID string) string {
@@ -376,12 +388,28 @@ func normalizeThoughtTree(thought *models.Thought, parent *models.Thought, paren
 	}
 }
 
+func safeUpdatedAt(session *models.Session) time.Time {
+	if session == nil {
+		return time.Time{}
+	}
+	if !session.UpdatedAt.IsZero() {
+		return session.UpdatedAt
+	}
+	if !session.CreatedAt.IsZero() {
+		return session.CreatedAt
+	}
+	return time.Now().UTC()
+}
+
 func (store *FileSessionStore) indexSessionLocked(session *models.Session) {
 	if session == nil {
 		return
 	}
 	if store.userIndex == nil {
 		store.userIndex = make(map[string]map[string]struct{})
+	}
+	if store.sessionIndex == nil {
+		store.sessionIndex = make(map[string]sessionMetadata)
 	}
 
 	for userID, ids := range store.userIndex {
@@ -394,6 +422,7 @@ func (store *FileSessionStore) indexSessionLocked(session *models.Session) {
 	}
 
 	if session.UserID == "" {
+		store.sessionIndex[session.ID] = sessionMetadata{UpdatedAt: safeUpdatedAt(session)}
 		return
 	}
 
@@ -403,6 +432,7 @@ func (store *FileSessionStore) indexSessionLocked(session *models.Session) {
 		store.userIndex[session.UserID] = ids
 	}
 	ids[session.ID] = struct{}{}
+	store.sessionIndex[session.ID] = sessionMetadata{UpdatedAt: safeUpdatedAt(session)}
 }
 
 func (store *FileSessionStore) removeFromIndexLocked(sessionID string) {
@@ -417,6 +447,9 @@ func (store *FileSessionStore) removeFromIndexLocked(sessionID string) {
 		if len(ids) == 0 {
 			delete(store.userIndex, userID)
 		}
+	}
+	if store.sessionIndex != nil {
+		delete(store.sessionIndex, sessionID)
 	}
 }
 
