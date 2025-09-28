@@ -3,6 +3,8 @@
 package services
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -168,4 +170,14 @@ func (sm *SessionManager) CleanupExpiredSessions() error {
 		}
 	}
 	return nil
+}
+
+func (sm *SessionManager) HealthCheck(ctx context.Context) error {
+	if sm == nil {
+		return errors.New("session manager is nil")
+	}
+	if sm.store == nil {
+		return errors.New("session store is nil")
+	}
+	return sm.store.Ping(ctx)
 }
