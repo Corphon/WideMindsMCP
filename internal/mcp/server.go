@@ -13,6 +13,7 @@ import (
 
 	appErrors "WideMindsMCP/internal/errors"
 	"WideMindsMCP/internal/services"
+	"WideMindsMCP/internal/utils"
 )
 
 // 结构体
@@ -22,6 +23,8 @@ type MCPServer struct {
 	tools           map[string]MCPTool
 	server          *http.Server
 	mutex           sync.RWMutex
+	authToken       string
+	rateLimiter     *utils.RateLimiter
 }
 
 type MCPRequest struct {
@@ -41,11 +44,13 @@ type MCPError struct {
 }
 
 // 函数
-func NewMCPServer(te *services.ThoughtExpander, sm *services.SessionManager) *MCPServer {
+func NewMCPServer(te *services.ThoughtExpander, sm *services.SessionManager, authToken string, rateLimitPerMinute int) *MCPServer {
 	return &MCPServer{
 		thoughtExpander: te,
 		sessionManager:  sm,
 		tools:           make(map[string]MCPTool),
+		authToken:       authToken,
+		rateLimiter:     utils.NewRateLimiter(rateLimitPerMinute, time.Minute),
 	}
 }
 
@@ -59,8 +64,8 @@ func (s *MCPServer) Start(port int) error {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mcp", s.handleHTTP)
-	mux.HandleFunc("/tools", s.handleTools)
+	mux.Handle("/mcp", s.wrapHandler(http.HandlerFunc(s.handleHTTP)))
+	mux.Handle("/tools", s.wrapHandler(http.HandlerFunc(s.handleTools)))
 
 	s.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
@@ -80,6 +85,34 @@ func (s *MCPServer) Start(port int) error {
 	}()
 
 	return nil
+}
+
+func (s *MCPServer) wrapHandler(handler http.Handler) http.Handler {
+	h := handler
+	if s.rateLimiter != nil {
+		next := h
+		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token := utils.ResolveRequestToken(r)
+			key := utils.ClientKey(r, token)
+			if !s.rateLimiter.Allow(key) {
+				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	if s.authToken != "" {
+		next := h
+		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token := utils.ResolveRequestToken(r)
+			if token != s.authToken {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	return h
 }
 
 func (s *MCPServer) HandleRequest(req *MCPRequest) *MCPResponse {
