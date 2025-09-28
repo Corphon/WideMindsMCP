@@ -2,6 +2,7 @@ package services_test
 
 import (
 	"testing"
+	"time"
 
 	"WideMindsMCP/internal/models"
 	"WideMindsMCP/internal/services"
@@ -39,5 +40,52 @@ func TestSessionManagerCreateAndRetrieve(t *testing.T) {
 	meta := fetched.GetMetadata()
 	if meta.TotalThoughts != 2 {
 		t.Fatalf("expected total thoughts 2, got %d", meta.TotalThoughts)
+	}
+}
+
+func TestSessionManagerListSessions(t *testing.T) {
+	store := storage.NewInMemorySessionStore()
+	manager := services.NewSessionManager(store)
+
+	if _, err := manager.ListSessions(""); err == nil {
+		t.Fatalf("expected error when listing sessions without user id")
+	}
+
+	first, err := manager.CreateSession("user-1", "First Concept")
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	second, err := manager.CreateSession("user-1", "Second Concept")
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+
+	secondFetched, err := manager.GetSession(second.ID)
+	if err != nil {
+		t.Fatalf("GetSession failed: %v", err)
+	}
+	secondFetched.AddContext("extra")
+	if err := manager.UpdateSession(secondFetched); err != nil {
+		t.Fatalf("UpdateSession failed: %v", err)
+	}
+
+	sessions, err := manager.ListSessions("user-1")
+	if err != nil {
+		t.Fatalf("ListSessions failed: %v", err)
+	}
+
+	if len(sessions) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(sessions))
+	}
+
+	if sessions[0].ID != second.ID {
+		t.Fatalf("expected most recent session first, got %s", sessions[0].ID)
+	}
+
+	if sessions[1].ID != first.ID {
+		t.Fatalf("expected first session second, got %s", sessions[1].ID)
 	}
 }
