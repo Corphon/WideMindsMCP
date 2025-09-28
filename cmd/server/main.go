@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	appErrors "WideMindsMCP/internal/errors"
 	"WideMindsMCP/internal/mcp"
@@ -25,14 +27,37 @@ import (
 
 // 结构体
 type Config struct {
-	Port         int    `yaml:"port" json:"port"`
-	MCPPort      int    `yaml:"mcp_port" json:"mcp_port"`
-	LLMAPIKey    string `yaml:"llm_api_key" json:"llm_api_key"`
-	LLMBaseURL   string `yaml:"llm_base_url" json:"llm_base_url"`
-	LLMModel     string `yaml:"llm_model" json:"llm_model"`
-	DataDir      string `yaml:"data_dir" json:"data_dir"`
-	WebDir       string `yaml:"web_dir" json:"web_dir"`
-	UseFileStore bool   `yaml:"use_file_store" json:"use_file_store"`
+	Port                   int    `yaml:"port" json:"port"`
+	MCPPort                int    `yaml:"mcp_port" json:"mcp_port"`
+	LLMAPIKey              string `yaml:"llm_api_key" json:"llm_api_key"`
+	LLMBaseURL             string `yaml:"llm_base_url" json:"llm_base_url"`
+	LLMModel               string `yaml:"llm_model" json:"llm_model"`
+	DataDir                string `yaml:"data_dir" json:"data_dir"`
+	WebDir                 string `yaml:"web_dir" json:"web_dir"`
+	UseFileStore           bool   `yaml:"use_file_store" json:"use_file_store"`
+	APIToken               string `yaml:"api_token" json:"api_token"`
+	HTTPRateLimitPerMinute int    `yaml:"http_rate_limit_per_minute" json:"http_rate_limit_per_minute"`
+	MCPRateLimitPerMinute  int    `yaml:"mcp_rate_limit_per_minute" json:"mcp_rate_limit_per_minute"`
+}
+
+const (
+	maxRequestBodyBytes     int64 = 64 * 1024
+	maxConceptLength              = 200
+	maxUserIDLength               = 64
+	maxSessionIDLength            = 64
+	maxDirectionTitleLength       = 120
+	maxDirectionDescLength        = 600
+	maxKeywordLength              = 50
+	maxDirectionKeywords          = 16
+	maxContextItems               = 20
+	maxContextItemLength          = 120
+)
+
+var allowedDirectionTypes = map[models.DirectionType]struct{}{
+	models.Broad:    {},
+	models.Deep:     {},
+	models.Lateral:  {},
+	models.Critical: {},
 }
 
 // 函数
@@ -49,13 +74,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	mcpServer := setupMCPServer(thoughtExpander, sessionManager)
+	mcpServer := setupMCPServer(cfg, thoughtExpander, sessionManager)
 	if err := mcpServer.Start(cfg.MCPPort); err != nil {
 		utils.Errorf("failed to start MCP server: %v", err)
 		os.Exit(1)
 	}
 
-	webMux := setupWebServer(cfg.WebDir, sessionManager, thoughtExpander)
+	webMux := setupWebServer(cfg, sessionManager, thoughtExpander)
 	webServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           webMux,
@@ -77,11 +102,13 @@ func main() {
 
 func loadConfig() (*Config, error) {
 	cfg := &Config{
-		Port:         8080,
-		MCPPort:      9090,
-		LLMModel:     "gpt-4.1",
-		WebDir:       "web",
-		UseFileStore: false,
+		Port:                   8080,
+		MCPPort:                9090,
+		LLMModel:               "gpt-4.1",
+		WebDir:                 "web",
+		UseFileStore:           false,
+		HTTPRateLimitPerMinute: 120,
+		MCPRateLimitPerMinute:  60,
 	}
 
 	configPath := flag.String("config", "configs/config.yaml", "Path to configuration file")
@@ -136,6 +163,19 @@ func applyEnvOverrides(cfg *Config) {
 	if val := os.Getenv("USE_FILE_STORE"); val != "" {
 		cfg.UseFileStore = strings.ToLower(val) == "true"
 	}
+	if val := os.Getenv("API_TOKEN"); val != "" {
+		cfg.APIToken = val
+	}
+	if val := os.Getenv("HTTP_RATE_LIMIT_PER_MINUTE"); val != "" {
+		if limit, err := strconv.Atoi(val); err == nil {
+			cfg.HTTPRateLimitPerMinute = limit
+		}
+	}
+	if val := os.Getenv("MCP_RATE_LIMIT_PER_MINUTE"); val != "" {
+		if limit, err := strconv.Atoi(val); err == nil {
+			cfg.MCPRateLimitPerMinute = limit
+		}
+	}
 }
 
 func initializeServices(config *Config) (*services.ThoughtExpander, *services.SessionManager, error) {
@@ -153,8 +193,8 @@ func initializeServices(config *Config) (*services.ThoughtExpander, *services.Se
 	return expander, sessionManager, nil
 }
 
-func setupMCPServer(te *services.ThoughtExpander, sm *services.SessionManager) *mcp.MCPServer {
-	server := mcp.NewMCPServer(te, sm)
+func setupMCPServer(cfg *Config, te *services.ThoughtExpander, sm *services.SessionManager) *mcp.MCPServer {
+	server := mcp.NewMCPServer(te, sm, cfg.APIToken, cfg.MCPRateLimitPerMinute)
 	server.RegisterTool("expand_thought", mcp.NewExpandThoughtTool(te))
 	server.RegisterTool("explore_direction", mcp.NewExploreDirectionTool(te))
 	server.RegisterTool("create_session", mcp.NewCreateSessionTool(sm))
@@ -162,7 +202,8 @@ func setupMCPServer(te *services.ThoughtExpander, sm *services.SessionManager) *
 	return server
 }
 
-func setupWebServer(webDir string, sessionManager *services.SessionManager, expander *services.ThoughtExpander) *http.ServeMux {
+func setupWebServer(cfg *Config, sessionManager *services.SessionManager, expander *services.ThoughtExpander) *http.ServeMux {
+	webDir := cfg.WebDir
 	if webDir == "" {
 		webDir = "web"
 	}
@@ -180,17 +221,59 @@ func setupWebServer(webDir string, sessionManager *services.SessionManager, expa
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	mux.HandleFunc("/api/sessions", func(w http.ResponseWriter, r *http.Request) {
+	rateLimiter := utils.NewRateLimiter(cfg.HTTPRateLimitPerMinute, time.Minute)
+
+	wrap := func(handler http.HandlerFunc, secure bool, limited bool) http.Handler {
+		h := http.Handler(handler)
+		if limited && rateLimiter != nil {
+			next := h
+			h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				token := utils.ResolveRequestToken(r)
+				key := utils.ClientKey(r, token)
+				if !rateLimiter.Allow(key) {
+					http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+		if secure && cfg.APIToken != "" {
+			next := h
+			h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				token := utils.ResolveRequestToken(r)
+				if token != cfg.APIToken {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+		return h
+	}
+
+	mux.Handle("/api/sessions", wrap(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
 			var payload struct {
 				UserID  string `json:"user_id"`
 				Concept string `json:"concept"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				respondError(w, fmt.Errorf("%w: %v", appErrors.ErrInvalidRequest, err))
+			if err := decodeJSONBody(w, r, &payload); err != nil {
+				respondError(w, err)
 				return
 			}
+			payload.UserID = strings.TrimSpace(payload.UserID)
+			payload.Concept = strings.TrimSpace(payload.Concept)
+
+			if err := validateUserID(payload.UserID); err != nil {
+				respondError(w, err)
+				return
+			}
+			if err := validateConcept(payload.Concept); err != nil {
+				respondError(w, err)
+				return
+			}
+
 			session, err := sessionManager.CreateSession(payload.UserID, payload.Concept)
 			if err != nil {
 				respondError(w, err)
@@ -200,12 +283,12 @@ func setupWebServer(webDir string, sessionManager *services.SessionManager, expa
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	}, true, true))
 
-	mux.HandleFunc("/api/sessions/", func(w http.ResponseWriter, r *http.Request) {
-		id := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
-		if id == "" {
-			respondError(w, appErrors.ErrInvalidRequest)
+	mux.Handle("/api/sessions/", wrap(func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/sessions/"))
+		if err := validateSessionID(id); err != nil {
+			respondError(w, err)
 			return
 		}
 		switch r.Method {
@@ -220,8 +303,12 @@ func setupWebServer(webDir string, sessionManager *services.SessionManager, expa
 			var payload struct {
 				Direction models.Direction `json:"direction"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				respondError(w, fmt.Errorf("%w: %v", appErrors.ErrInvalidRequest, err))
+			if err := decodeJSONBody(w, r, &payload); err != nil {
+				respondError(w, err)
+				return
+			}
+			if err := validateDirection(&payload.Direction); err != nil {
+				respondError(w, err)
 				return
 			}
 			thought, err := expander.ExploreDirection(payload.Direction, id)
@@ -233,9 +320,9 @@ func setupWebServer(webDir string, sessionManager *services.SessionManager, expa
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	}, true, true))
 
-	mux.HandleFunc("/api/expand", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/expand", wrap(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -245,13 +332,38 @@ func setupWebServer(webDir string, sessionManager *services.SessionManager, expa
 			Context       []string `json:"context"`
 			ExpansionType string   `json:"expansion_type"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			respondError(w, fmt.Errorf("%w: %v", appErrors.ErrInvalidRequest, err))
+		if err := decodeJSONBody(w, r, &payload); err != nil {
+			respondError(w, err)
 			return
 		}
+
+		payload.Concept = strings.TrimSpace(payload.Concept)
+		if err := validateConcept(payload.Concept); err != nil {
+			respondError(w, err)
+			return
+		}
+
+		normalizedContext, err := normalizeContext(payload.Context)
+		if err != nil {
+			respondError(w, err)
+			return
+		}
+
+		expansionType := strings.ToLower(strings.TrimSpace(payload.ExpansionType))
+		if expansionType != "" {
+			dirType := models.DirectionType(expansionType)
+			if _, ok := allowedDirectionTypes[dirType]; !ok {
+				respondError(w, fmt.Errorf("%w: invalid expansion_type", appErrors.ErrInvalidRequest))
+				return
+			}
+			payload.ExpansionType = expansionType
+		} else {
+			payload.ExpansionType = ""
+		}
+
 		result, err := expander.Expand(&services.ExpansionRequest{
 			Concept:       payload.Concept,
-			Context:       payload.Context,
+			Context:       normalizedContext,
 			ExpansionType: models.DirectionType(payload.ExpansionType),
 		})
 		if err != nil {
@@ -259,7 +371,7 @@ func setupWebServer(webDir string, sessionManager *services.SessionManager, expa
 			return
 		}
 		respondJSON(w, result)
-	})
+	}, true, true))
 
 	return mux
 }
@@ -304,4 +416,134 @@ func statusFromError(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) error {
+	if r == nil || r.Body == nil {
+		return validationError("request body is empty")
+	}
+
+	limited := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	defer limited.Close()
+
+	decoder := json.NewDecoder(limited)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			return validationError("request body is empty")
+		}
+		return fmt.Errorf("%w: %v", appErrors.ErrInvalidRequest, err)
+	}
+
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return validationError("request body must contain a single JSON value")
+	}
+
+	return nil
+}
+
+func validateConcept(concept string) error {
+	if concept == "" {
+		return validationError("concept is required")
+	}
+	if utf8.RuneCountInString(concept) > maxConceptLength {
+		return validationError("concept is too long")
+	}
+	return nil
+}
+
+func validateUserID(userID string) error {
+	if userID == "" {
+		return nil
+	}
+	if strings.ContainsAny(userID, " \t\r\n") {
+		return validationError("user_id must not contain whitespace")
+	}
+	if utf8.RuneCountInString(userID) > maxUserIDLength {
+		return validationError("user_id is too long")
+	}
+	return nil
+}
+
+func validateSessionID(id string) error {
+	if id == "" {
+		return validationError("session_id is required")
+	}
+	if strings.ContainsAny(id, " \t\r\n") {
+		return validationError("session_id must not contain whitespace")
+	}
+	if utf8.RuneCountInString(id) > maxSessionIDLength {
+		return validationError("session_id is too long")
+	}
+	return nil
+}
+
+func normalizeContext(items []string) ([]string, error) {
+	if len(items) > maxContextItems {
+		return nil, validationError("context has too many entries")
+	}
+	normalized := make([]string, 0, len(items))
+	for _, item := range items {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if utf8.RuneCountInString(trimmed) > maxContextItemLength {
+			return nil, validationError("context item is too long")
+		}
+		normalized = append(normalized, trimmed)
+	}
+	return normalized, nil
+}
+
+func validateDirection(direction *models.Direction) error {
+	if direction == nil {
+		return validationError("direction is required")
+	}
+
+	dirType := models.DirectionType(strings.ToLower(strings.TrimSpace(string(direction.Type))))
+	if _, ok := allowedDirectionTypes[dirType]; !ok {
+		return validationError("direction.type is invalid")
+	}
+	direction.Type = dirType
+
+	direction.Title = strings.TrimSpace(direction.Title)
+	if direction.Title == "" {
+		return validationError("direction.title is required")
+	}
+	if utf8.RuneCountInString(direction.Title) > maxDirectionTitleLength {
+		return validationError("direction.title is too long")
+	}
+
+	direction.Description = strings.TrimSpace(direction.Description)
+	if utf8.RuneCountInString(direction.Description) > maxDirectionDescLength {
+		return validationError("direction.description is too long")
+	}
+
+	cleanedKeywords := make([]string, 0, len(direction.Keywords))
+	for _, keyword := range direction.Keywords {
+		trimmed := strings.TrimSpace(keyword)
+		if trimmed == "" {
+			continue
+		}
+		if utf8.RuneCountInString(trimmed) > maxKeywordLength {
+			return validationError("direction.keywords contains an entry that is too long")
+		}
+		cleanedKeywords = append(cleanedKeywords, trimmed)
+		if len(cleanedKeywords) > maxDirectionKeywords {
+			return validationError("direction.keywords has too many entries")
+		}
+	}
+	direction.Keywords = cleanedKeywords
+
+	if direction.Relevance < 0 || direction.Relevance > 1 {
+		return validationError("direction.relevance must be between 0 and 1")
+	}
+
+	return nil
+}
+
+func validationError(msg string) error {
+	return fmt.Errorf("%w: %s", appErrors.ErrInvalidRequest, msg)
 }
