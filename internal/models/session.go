@@ -11,19 +11,19 @@ import (
 
 // 结构体
 type Session struct {
-	ID          string
-	UserID      string
-	RootThought *Thought
-	Context     []string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	IsActive    bool
+	ID          string    `json:"id"`
+	UserID      string    `json:"userId"`
+	RootThought *Thought  `json:"rootThought,omitempty"`
+	Context     []string  `json:"context,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	IsActive    bool      `json:"isActive"`
 }
 
 type SessionMetadata struct {
-	TotalThoughts int
-	MaxDepth      int
-	Directions    []string
+	TotalThoughts int      `json:"totalThoughts"`
+	MaxDepth      int      `json:"maxDepth"`
+	Directions    []string `json:"directions"`
 }
 
 // 方法
