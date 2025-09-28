@@ -43,6 +43,12 @@ type MCPError struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
+type ToolDescriptor struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Schema      map[string]interface{} `json:"schema"`
+}
+
 // 函数
 func NewMCPServer(te *services.ThoughtExpander, sm *services.SessionManager, authToken string, rateLimitPerMinute int) *MCPServer {
 	return &MCPServer{
@@ -154,6 +160,24 @@ func (s *MCPServer) GetToolList() []string {
 	return names
 }
 
+func (s *MCPServer) GetToolDescriptors() []ToolDescriptor {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	descriptors := make([]ToolDescriptor, 0, len(s.tools))
+	for name, tool := range s.tools {
+		if tool == nil {
+			continue
+		}
+		descriptors = append(descriptors, ToolDescriptor{
+			Name:        name,
+			Description: tool.Description(),
+			Schema:      tool.Schema(),
+		})
+	}
+	return descriptors
+}
+
 func (s *MCPServer) Shutdown() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -191,7 +215,7 @@ func (s *MCPServer) handleTools(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	resp := MCPResponse{Result: s.GetToolList()}
+	resp := MCPResponse{Result: s.GetToolDescriptors()}
 	respondJSON(w, resp)
 }
 
